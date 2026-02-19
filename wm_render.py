@@ -46,9 +46,27 @@ async def _download_bytes(url: str, *, timeout_sec: float = 10.0) -> bytes | Non
         return None
 
 
-def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+def _load_font(
+    size: int,
+    *,
+    weight: str = "regular",
+) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """加载字体。
+
+    优先使用插件自带 fonts 下的 NotoSansHans 字体（保证中文不乱码）；
+    若缺失，再回退系统字体，最后回退 Pillow 默认字体。
+    """
+
     candidates: list[str] = []
 
+    # 1) 插件自带字体（优先）
+    fonts_dir = Path(__file__).resolve().parent / "fonts"
+    if fonts_dir.exists():
+        if weight.lower() in {"medium", "bold", "semibold"}:
+            candidates.append(str(fonts_dir / "NotoSansHans-Medium.otf"))
+        candidates.append(str(fonts_dir / "NotoSansHans-Regular.otf"))
+
+    # 2) 系统字体（兜底）
     windir = os.environ.get("WINDIR") or os.environ.get("SystemRoot")
     if windir:
         candidates.extend(
@@ -60,11 +78,10 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
             ],
         )
 
-    # 常见 Linux 字体
     candidates.extend(
         [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/System/Library/Fonts/PingFang.ttc",
         ],
     )
@@ -91,7 +108,7 @@ def _open_image_rgba(image_bytes: bytes, *, size: tuple[int, int]) -> Image.Imag
 def _placeholder_avatar(*, size: int = 48) -> Image.Image:
     img = Image.new("RGBA", (size, size), (230, 230, 230, 255))
     d = ImageDraw.Draw(img)
-    font = _load_font(max(12, size // 2))
+    font = _load_font(max(12, size // 2), weight="medium")
     text = "?"
     bbox = d.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
@@ -119,7 +136,8 @@ def _render_image(
     d = ImageDraw.Draw(bg)
 
     font_title = _load_font(34)
-    font_small = _load_font(22)
+    font_title = _load_font(34, weight="medium")
+    font_small = _load_font(22, weight="regular")
 
     # Header
     x = margin

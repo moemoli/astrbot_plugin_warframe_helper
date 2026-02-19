@@ -489,7 +489,7 @@ class WarframeTermMapper:
             f"Query: {query}\n"
             "JSON:"
         )
-
+        logger.info(f"LLM prompt for warframe.market slug suggestion: {prompt}")
         try:
             llm_resp = await context.llm_generate(
                 chat_provider_id=provider_id,
@@ -498,6 +498,7 @@ class WarframeTermMapper:
                 temperature=0,
                 timeout=self._ai_timeout_sec,
             )
+            
         except TypeError:
             # 某些 Provider 可能不支持 timeout 参数
             try:
@@ -511,7 +512,7 @@ class WarframeTermMapper:
                 return []
         except Exception:
             return []
-
+        logger.info(f"LLM response for warframe.market slug suggestion: {llm_resp.completion_text or 'empty'}")
         text = (llm_resp.completion_text or "").strip()
         return self._parse_ai_slugs(text)
 
