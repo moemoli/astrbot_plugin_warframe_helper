@@ -1,9 +1,9 @@
-# astrbot-plugin-helloworld
+# astrbot_plugin_warframe_helper
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+AstrBot Warframe Helper 插件
 
 > [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
+> Repo: https://github.com/moemoli/astrbot_plugin_warframe_helper
 > 
 > [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
 
