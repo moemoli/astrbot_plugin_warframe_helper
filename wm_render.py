@@ -105,6 +105,22 @@ def _open_image_rgba(image_bytes: bytes, *, size: tuple[int, int]) -> Image.Imag
         return None
 
 
+def _circle_mask(size: int) -> Image.Image:
+    mask = Image.new("L", (size, size), 0)
+    d = ImageDraw.Draw(mask)
+    d.ellipse((0, 0, size - 1, size - 1), fill=255)
+    return mask
+
+
+def _circle_avatar(img: Image.Image, *, size: int) -> Image.Image:
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    img = img.resize((size, size), Image.Resampling.LANCZOS)
+    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    out.paste(img, (0, 0), _circle_mask(size))
+    return out
+
+
 def _placeholder_avatar(*, size: int = 48) -> Image.Image:
     img = Image.new("RGBA", (size, size), (230, 230, 230, 255))
     d = ImageDraw.Draw(img)
@@ -114,37 +130,55 @@ def _placeholder_avatar(*, size: int = 48) -> Image.Image:
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
     d.text(((size - tw) / 2, (size - th) / 2 - 2), text, fill=(120, 120, 120, 255), font=font)
-    return img
+    return _circle_avatar(img, size=size)
+
+
+def _status_dot_color(status: str | None) -> tuple[int, int, int, int]:
+    """根据 warframe.market 的用户在线状态返回圆点颜色。
+
+    期望：
+    - 游戏中(ingame) -> 绿点
+    - 在线(online) -> 黄点
+    - 离线(offline/unknown) -> 灰点
+    """
+
+    s = (status or "").strip().lower()
+    if s in {"ingame", "in_game", "in-game", "in game"}:
+        return (34, 197, 94, 255)  # green
+    if s in {"online"}:
+        return (234, 179, 8, 255)  # yellow
+    return (156, 163, 175, 255)  # gray
 
 
 def _render_image(
     *,
     title: str,
     item_img: Image.Image | None,
-    rows: list[tuple[int, str, str, Image.Image]],
+    rows: list[tuple[int, int, str, str | None, Image.Image]],
 ) -> bytes:
-    # 简单的卡片式布局
+    # 轻量卡片布局（避免引入额外功能，仅做排版美化）
     margin = 24
-    header_h = 120
-    row_h = 64
-    avatar_size = 48
+    header_h = 128
+    row_h = 76
+    avatar_size = 52
+    row_gap = 10
 
-    width = 900
-    height = margin * 2 + header_h + len(rows) * row_h
+    width = 920
+    height = margin * 2 + header_h + len(rows) * row_h + max(0, len(rows) - 1) * row_gap
 
-    bg = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+    bg = Image.new("RGBA", (width, height), (250, 250, 251, 255))
     d = ImageDraw.Draw(bg)
 
-    font_title = _load_font(34)
     font_title = _load_font(34, weight="medium")
-    font_small = _load_font(22, weight="regular")
+    font_name = _load_font(24, weight="medium")
+    font_meta = _load_font(20, weight="regular")
 
     # Header
     x = margin
     y = margin
     if item_img is not None:
-        bg.alpha_composite(item_img, (x, y + 8))
-        x += item_img.size[0] + 16
+        bg.alpha_composite(_circle_avatar(item_img, size=96), (x, y + 10))
+        x += 96 + 16
 
     # 标题换行截断（尽量不溢出）
     max_title_w = width - margin - x
@@ -160,42 +194,75 @@ def _render_image(
     d.text((x, y + 18), title_text, fill=(0, 0, 0, 255), font=font_title)
 
     # 分割线
-    d.line((margin, margin + header_h, width - margin, margin + header_h), fill=(220, 220, 220, 255), width=2)
+    d.line(
+        (margin, margin + header_h, width - margin, margin + header_h),
+        fill=(224, 224, 227, 255),
+        width=2,
+    )
 
     # Rows
-    start_y = margin + header_h
-    for idx, (price, player, status, avatar_img) in enumerate(rows, start=1):
-        row_y = start_y + (idx - 1) * row_h
+    start_y = margin + header_h + 18
+    row_x0 = margin
+    row_x1 = width - margin
+    radius = 14
+
+    for i, (price, qty, player, status, avatar_img) in enumerate(rows):
+        row_y = start_y + i * (row_h + row_gap)
+
+        # row card
+        d.rounded_rectangle(
+            (row_x0, row_y, row_x1, row_y + row_h),
+            radius=radius,
+            fill=(255, 255, 255, 255),
+            outline=(232, 232, 236, 255),
+            width=1,
+        )
+
         # avatar
-        ax = margin
+        ax = row_x0 + 14
         ay = row_y + (row_h - avatar_size) // 2
-        bg.alpha_composite(avatar_img, (ax, ay))
+        bg.alpha_composite(_circle_avatar(avatar_img, size=avatar_size), (ax, ay))
 
-        # texts
-        tx = ax + avatar_size + 16
-        d.text((tx, row_y + 18), f"{idx}. {price}p", fill=(0, 0, 0, 255), font=font_small)
-
-        # player name
-        name_x = tx + 130
-        name_text = player or "unknown"
-        bbox = d.textbbox((0, 0), name_text, font=font_small)
-        if (bbox[2] - bbox[0]) > 360:
-            # 简单截断
+        # name + dot
+        name_x = ax + avatar_size + 14
+        name_text = (player or "unknown").strip() or "unknown"
+        # 名字截断，避免挤到右侧价格
+        max_name_w = 430
+        bbox = d.textbbox((0, 0), name_text, font=font_name)
+        if (bbox[2] - bbox[0]) > max_name_w:
             while len(name_text) > 3:
                 name_text = name_text[:-1]
-                bbox = d.textbbox((0, 0), name_text + "…", font=font_small)
-                if (bbox[2] - bbox[0]) <= 360:
+                bbox = d.textbbox((0, 0), name_text + "…", font=font_name)
+                if (bbox[2] - bbox[0]) <= max_name_w:
                     name_text = name_text + "…"
                     break
-        d.text((name_x, row_y + 18), name_text, fill=(0, 0, 0, 255), font=font_small)
 
-        # status
-        status_text = status or "unknown"
-        d.text((width - margin - 220, row_y + 18), status_text, fill=(80, 80, 80, 255), font=font_small)
+        name_y = row_y + 18
+        d.text((name_x, name_y), name_text, fill=(17, 24, 39, 255), font=font_name)
 
-        # row separator
-        if idx != len(rows):
-            d.line((margin, row_y + row_h, width - margin, row_y + row_h), fill=(235, 235, 235, 255), width=1)
+        # status dot: name 后方
+        dot_color = _status_dot_color(status)
+        name_w = d.textbbox((0, 0), name_text, font=font_name)[2]
+        dot_r = 6
+        dot_x = name_x + name_w + 10
+        dot_y = name_y + 9
+        d.ellipse(
+            (dot_x, dot_y, dot_x + dot_r * 2, dot_y + dot_r * 2),
+            fill=dot_color,
+            outline=(255, 255, 255, 255),
+            width=2,
+        )
+
+        # price (right)
+        price_text = f"{price}p"
+        qty_text = f"x{qty}" if qty > 1 else ""
+        # 右对齐
+        price_bbox = d.textbbox((0, 0), price_text, font=font_name)
+        price_w = price_bbox[2] - price_bbox[0]
+        price_x = row_x1 - 18 - price_w
+        d.text((price_x, name_y), price_text, fill=(0, 0, 0, 255), font=font_name)
+        if qty_text:
+            d.text((price_x, name_y + 30), qty_text, fill=(107, 114, 128, 255), font=font_meta)
 
     out = io.BytesIO()
     bg.convert("RGB").save(out, format="PNG")
@@ -243,7 +310,7 @@ async def render_wm_orders_image_to_file(
 
     avatar_bytes_list = await asyncio.gather(*[dl(u) for u in avatar_urls])
 
-    rows: list[tuple[int, str, str, Image.Image]] = []
+    rows: list[tuple[int, int, str, str | None, Image.Image]] = []
     placeholder = _placeholder_avatar(size=48)
     for o, avatar_bytes in zip(orders[:limit], avatar_bytes_list, strict=False):
         avatar_img = placeholder
@@ -255,8 +322,9 @@ async def render_wm_orders_image_to_file(
         rows.append(
             (
                 int(o.platinum),
+                int(o.quantity),
                 (o.ingame_name or "unknown"),
-                (o.status or "unknown"),
+                o.status,
                 avatar_img,
             ),
         )
