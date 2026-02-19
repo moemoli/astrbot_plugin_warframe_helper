@@ -12,3 +12,37 @@ AstrBot Warframe Helper 插件
 - [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
 - [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
 - [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+
+# 词条映射（别名/简写 -> 官方词条）
+
+本插件包含一个小型“词条映射层”，用于将常见简写/外号解析为 warframe.market 的官方词条（slug）。
+
+## 指令
+
+- `/wfmap <query>`
+	- 示例：`/wfmap 猴p` -> `Wukong Prime Set (wukong_prime_set)`
+
+- `/wm <物品> [平台] [收/卖] [语言] [数量]`
+	- 查询成功时返回一张渲染图片（包含物品名、物品图、订单列表与玩家头像）。
+	- 示例：`/wm 猴p pc`（查询 PC 平台出售单，低到高前 10）
+	- 示例：`/wm 猴p pc 收`（查询 PC 平台收购单，低到高前 10）
+	- 示例：`/wm 猴p pc 收 zh 10`（指定语言与返回数量；语言缺失时默认 `zh`，数量缺失时默认 `10`）
+
+当内置规则与本地别名未命中时，插件会调用 AstrBot 当前会话的聊天模型（LLM）生成候选 slug，并通过 warframe.market v2 API 校验存在性后再返回结果。
+
+## 扩展别名
+
+创建或编辑：
+
+- `data/plugin_data/astrbot_plugin_warframe_helper/aliases.json`
+
+示例：
+
+```json
+{
+	"aliases": {
+		"猴p": "wukong_prime_set",
+		"悟空p": "wukong_prime_set"
+	}
+}
+```

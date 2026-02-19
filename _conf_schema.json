@@ -1,0 +1,8 @@
+{
+  "unknown_abbrev_provider_id": {
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "description": "解析模型"
+  }
+}
