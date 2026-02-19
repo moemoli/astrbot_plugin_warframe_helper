@@ -148,7 +148,25 @@ class MyPlugin(Star):
             and o.order_type == order_type
             and (o.platform or "").lower() == platform_norm
         ]
-        filtered.sort(key=lambda o: o.platinum)
+
+        def status_rank(status: str | None) -> int:
+            s = (status or "").strip().lower()
+            if s == "ingame":
+                return 0
+            if s == "online":
+                return 1
+            if s == "offline":
+                return 2
+            return 3
+
+        # 优先展示“游戏中”的玩家，其次在线，再离线；同一状态内按价格升序
+        filtered.sort(
+            key=lambda o: (
+                status_rank(o.status),
+                o.platinum,
+                (o.ingame_name or ""),
+            ),
+        )
         limit = max(1, min(int(limit), 20))
         top = filtered[:limit]
 

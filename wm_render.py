@@ -150,6 +150,38 @@ def _status_dot_color(status: str | None) -> tuple[int, int, int, int]:
     return (156, 163, 175, 255)  # gray
 
 
+def _row_accent_color(status: str | None) -> tuple[int, int, int, int]:
+    s = (status or "").strip().lower()
+    if s in {"ingame", "in_game", "in-game", "in game"}:
+        return (16, 185, 129, 255)  # emerald
+    if s in {"online"}:
+        return (245, 158, 11, 255)  # amber
+    return (209, 213, 219, 255)  # gray
+
+
+def _linear_gradient(
+    *,
+    size: tuple[int, int],
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> Image.Image:
+    """生成一个简单的横向线性渐变 RGBA 图。"""
+
+    w, h = size
+    img = Image.new("RGBA", (w, h), left)
+    d = ImageDraw.Draw(img)
+    for x in range(w):
+        t = x / max(1, (w - 1))
+        c = (
+            int(left[0] * (1 - t) + right[0] * t),
+            int(left[1] * (1 - t) + right[1] * t),
+            int(left[2] * (1 - t) + right[2] * t),
+            int(left[3] * (1 - t) + right[3] * t),
+        )
+        d.line((x, 0, x, h), fill=c)
+    return img
+
+
 def _render_image(
     *,
     title: str,
@@ -166,12 +198,20 @@ def _render_image(
     width = 920
     height = margin * 2 + header_h + len(rows) * row_h + max(0, len(rows) - 1) * row_gap
 
-    bg = Image.new("RGBA", (width, height), (250, 250, 251, 255))
+    bg = Image.new("RGBA", (width, height), (248, 250, 252, 255))
     d = ImageDraw.Draw(bg)
 
     font_title = _load_font(34, weight="medium")
     font_name = _load_font(24, weight="medium")
     font_meta = _load_font(20, weight="regular")
+
+    # Header: 轻渐变背景
+    header_grad = _linear_gradient(
+        size=(width, margin + header_h + 8),
+        left=(239, 246, 255, 255),
+        right=(245, 243, 255, 255),
+    )
+    bg.alpha_composite(header_grad, (0, 0))
 
     # Header
     x = margin
@@ -191,12 +231,12 @@ def _render_image(
     if title_text != title:
         title_text = title_text.rstrip() + "…"
 
-    d.text((x, y + 18), title_text, fill=(0, 0, 0, 255), font=font_title)
+    d.text((x, y + 18), title_text, fill=(15, 23, 42, 255), font=font_title)
 
     # 分割线
     d.line(
         (margin, margin + header_h, width - margin, margin + header_h),
-        fill=(224, 224, 227, 255),
+        fill=(226, 232, 240, 255),
         width=2,
     )
 
@@ -209,13 +249,22 @@ def _render_image(
     for i, (price, qty, player, status, avatar_img) in enumerate(rows):
         row_y = start_y + i * (row_h + row_gap)
 
+        accent = _row_accent_color(status)
+
         # row card
         d.rounded_rectangle(
             (row_x0, row_y, row_x1, row_y + row_h),
             radius=radius,
             fill=(255, 255, 255, 255),
-            outline=(232, 232, 236, 255),
+            outline=(226, 232, 240, 255),
             width=1,
+        )
+
+        # 左侧强调色条（根据状态）
+        d.rounded_rectangle(
+            (row_x0 + 2, row_y + 10, row_x0 + 8, row_y + row_h - 10),
+            radius=3,
+            fill=(accent[0], accent[1], accent[2], 200),
         )
 
         # avatar
@@ -260,7 +309,8 @@ def _render_image(
         price_bbox = d.textbbox((0, 0), price_text, font=font_name)
         price_w = price_bbox[2] - price_bbox[0]
         price_x = row_x1 - 18 - price_w
-        d.text((price_x, name_y), price_text, fill=(0, 0, 0, 255), font=font_name)
+        # 价格稍微用强调色，提升可读性
+        d.text((price_x, name_y), price_text, fill=(37, 99, 235, 255), font=font_name)
         if qty_text:
             d.text((price_x, name_y + 30), qty_text, fill=(107, 114, 128, 255), font=font_meta)
 
@@ -289,7 +339,7 @@ async def render_wm_orders_image_to_file(
     limit = min(limit, 20)
 
     item_name = item.get_localized_name(language)
-    title = f"{item_name}（{platform}）{action_cn} 低->高 前{min(limit, len(orders))}"
+    title = f"{item_name}（{platform}）{action_cn}（游戏中优先）前{min(limit, len(orders))}"
 
     # 下载物品图
     item_img: Image.Image | None = None
