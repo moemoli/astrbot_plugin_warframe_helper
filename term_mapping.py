@@ -76,9 +76,205 @@ class WarframeTermMapper:
     """
 
     _BUILTIN_BASE_NICKNAMES: dict[str, str] = {
-        # 战甲中文外号 -> warframe.market slug 基名
+        # 战甲别名/简称 -> warframe.market prime 词条 slug 的“基名”
+        # 说明：这里的 value 不是完整 item slug，而是用于拼接：
+        # - “p/prime” => f"{base}_prime_set"
+        # - “p机体/蓝图/系统/头/总图” => f"{base}_prime_<part>"
+        # 因此优先收录“确定无歧义”的官方中文名/常用外号；有歧义的建议放 aliases.json。
+
+        # ---- 起始战甲 / 老牌常用 ----
+        "excalibur": "excalibur",
+        "圣剑": "excalibur",
+        "剑男": "excalibur",
+
+        "mag": "mag",
+        "磁力": "mag",
+        "磁妈": "mag",
+
+        "volt": "volt",
+        "伏特": "volt",
+        "电男": "volt",
+
+        "rhino": "rhino",
+        "犀牛": "rhino",
+
+        "loki": "loki",
+        "洛基": "loki",
+        "老洛": "loki",
+
+        "ember": "ember",
+        "灰烬": "ember",
+        "火女": "ember",
+
+        "frost": "frost",
+        "冰霜": "frost",
+        "冰男": "frost",
+
+        "trinity": "trinity",
+        "三位一体": "trinity",
+        "奶妈": "trinity",
+        "三妈": "trinity",
+
+        "nova": "nova",
+        "新星": "nova",
+
+        "saryn": "saryn",
+        "沙林": "saryn",
+        "毒妈": "saryn",
+
+        "mesa": "mesa",
+        "魅莎": "mesa",
+        "女枪": "mesa",
+
+        "nekros": "nekros",
+        "死灵": "nekros",
+        "摸尸": "nekros",
+
+        "hydroid": "hydroid",
+        "海盗": "hydroid",
+        "水男": "hydroid",
+
+        "ivara": "ivara",
+        "伊瓦拉": "ivara",
+        "弓妹": "ivara",
+
+        "inaros": "inaros",
+        "伊纳罗斯": "inaros",
+        "沙甲": "inaros",
+
+        "wukong": "wukong",
         "猴": "wukong",
         "悟空": "wukong",
+
+        "nezha": "nezha",
+        "哪吒": "nezha",
+
+        "nidus": "nidus",
+        "尼德斯": "nidus",
+
+        # ---- 其他常见 Prime 战甲（官方中文名/常用称呼） ----
+        "ash": "ash",
+        "灰烬之刃": "ash",
+
+        "banshee": "banshee",
+        "女妖": "banshee",
+
+        "nyx": "nyx",
+        "灵煞": "nyx",
+        "脑溢血": "nyx",
+
+        "vauban": "vauban",
+        "瓦邦": "vauban",
+
+        "valkyr": "valkyr",
+        "女武神": "valkyr",
+        "瓦尔基里": "valkyr",
+
+        "zephyr": "zephyr",
+        "狂啸": "zephyr",
+
+        "oberon": "oberon",
+        "奥伯龙": "oberon",
+
+        "mirage": "mirage",
+        "幻蝶": "mirage",
+
+        "limbo": "limbo",
+        "林波": "limbo",
+        "小明": "limbo",
+        "李明博": "limbo",
+
+        "chroma": "chroma",
+        "龙甲": "chroma",
+
+        "atlas": "atlas",
+        "阿特拉斯": "atlas",
+        "石甲": "atlas",
+
+        "equinox": "equinox",
+        "阴阳双子": "equinox",
+
+        "titania": "titania",
+        "泰坦尼亚": "titania",
+        "妖精": "titania",
+
+        "octavia": "octavia",
+        "奥克塔维亚": "octavia",
+        "歌姬": "octavia",
+
+        "harrow": "harrow",
+        "哈洛": "harrow",
+
+        "gara": "gara",
+        "迦拉": "gara",
+        "玻璃": "gara",
+
+        "khora": "khora",
+        "科拉": "khora",
+        "鞭女": "khora",
+
+        "revenant": "revenant",
+        "亡魂": "revenant",
+
+        "garuda": "garuda",
+        "迦楼罗": "garuda",
+
+        "baruuk": "baruuk",
+        "巴鲁克": "baruuk",
+
+        "hildryn": "hildryn",
+        "希尔德琳": "hildryn",
+
+        "gauss": "gauss",
+        "高斯": "gauss",
+
+        "grendel": "grendel",
+        "格伦德尔": "grendel",
+
+        "protea": "protea",
+        "普罗蒂亚": "protea",
+
+        "xaku": "xaku",
+        "扎库": "xaku",
+
+        "lavos": "lavos",
+        "拉沃斯": "lavos",
+
+        "sevagoth": "sevagoth",
+        "塞瓦格斯": "sevagoth",
+
+        "yareli": "yareli",
+        "亚蕾丽": "yareli",
+
+        "caliban": "caliban",
+        "卡利班": "caliban",
+
+        "gyre": "gyre",
+        "吉尔": "gyre",
+
+        "styanax": "styanax",
+        "斯提亚纳克斯": "styanax",
+
+        "voruna": "voruna",
+        "沃鲁娜": "voruna",
+
+        "citrine": "citrine",
+        "西翠恩": "citrine",
+
+        "kullervo": "kullervo",
+        "库勒沃": "kullervo",
+
+        "dagath": "dagath",
+        "达加斯": "dagath",
+
+        "qorvex": "qorvex",
+        "科维克斯": "qorvex",
+
+        "dante": "dante",
+        "但丁": "dante",
+
+        "jade": "jade",
+        "翡翠": "jade",
     }
 
     def __init__(
@@ -489,7 +685,6 @@ class WarframeTermMapper:
             f"Query: {query}\n"
             "JSON:"
         )
-        logger.info(f"LLM prompt for warframe.market slug suggestion: {prompt}")
         try:
             llm_resp = await context.llm_generate(
                 chat_provider_id=provider_id,

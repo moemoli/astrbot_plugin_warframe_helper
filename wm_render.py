@@ -339,7 +339,7 @@ async def render_wm_orders_image_to_file(
     limit = min(limit, 20)
 
     item_name = item.get_localized_name(language)
-    title = f"{item_name}（{platform}）{action_cn}（游戏中优先）前{min(limit, len(orders))}"
+    title = f"{item_name}（{platform}）{action_cn}"
 
     # 下载物品图
     item_img: Image.Image | None = None

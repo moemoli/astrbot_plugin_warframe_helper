@@ -1,9 +1,11 @@
 import re
+import time
 
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.core.star.filter.command import GreedyStr
+from astrbot.api.message_components import Reply
 
 from .market_client import WarframeMarketClient
 from .term_mapping import WarframeTermMapper
@@ -16,6 +18,46 @@ class MyPlugin(Star):
         self.config = config
         self.term_mapper = WarframeTermMapper()
         self.market_client = WarframeMarketClient()
+
+        # 最近一次 /wm 的 TopN 结果缓存（用于“回复图片发数字”快速生成 /w 话术）
+        # key = unified_origin + sender_id
+        self._wm_pick_cache: dict[str, dict] = {}
+        self._wm_pick_cache_ttl_sec: float = 8 * 60
+
+    def _wm_cache_key(self, event: AstrMessageEvent) -> str:
+        return f"{event.unified_msg_origin}|{event.get_sender_id()}"
+
+    def _wm_put_pick_cache(
+        self,
+        *,
+        event: AstrMessageEvent,
+        item_name_en: str,
+        order_type: str,
+        platform: str,
+        rows,
+    ) -> None:
+        try:
+            self._wm_pick_cache[self._wm_cache_key(event)] = {
+                "ts": time.time(),
+                "item_name_en": item_name_en,
+                "order_type": order_type,
+                "platform": platform,
+                # rows: list[{"name": str, "platinum": int}]
+                "rows": rows,
+            }
+        except Exception:
+            return
+
+    def _wm_get_pick_cache(self, event: AstrMessageEvent) -> dict | None:
+        rec = self._wm_pick_cache.get(self._wm_cache_key(event))
+        if not isinstance(rec, dict):
+            return None
+        ts = rec.get("ts")
+        if not isinstance(ts, (int, float)):
+            return None
+        if (time.time() - float(ts)) > self._wm_pick_cache_ttl_sec:
+            return None
+        return rec
 
     async def initialize(self):
         """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
@@ -177,6 +219,21 @@ class MyPlugin(Star):
             )
             return
 
+        # 缓存本次 TopN（用于后续“回复图片发数字”）
+        self._wm_put_pick_cache(
+            event=event,
+            item_name_en=item.name,
+            order_type=order_type,
+            platform=platform_norm,
+            rows=[
+                {
+                    "name": (o.ingame_name or "").strip(),
+                    "platinum": int(o.platinum),
+                }
+                for o in top
+            ],
+        )
+
         rendered = await render_wm_orders_image_to_file(
             item=item,
             orders=top,
@@ -196,6 +253,59 @@ class MyPlugin(Star):
             name = o.ingame_name or "unknown"
             lines.append(f"{idx}. {o.platinum}p  {status}  {name}")
         yield event.plain_result("\n".join(lines))
+
+    @filter.regex(r"^\d+$")
+    async def wm_pick_number(self, event: AstrMessageEvent):
+        """当用户回复 /wm 结果图并只发送数字时，返回对应玩家的 /w 话术。"""
+
+        # 避免进入默认 LLM 链路
+        try:
+            event.should_call_llm(False)
+        except Exception:
+            pass
+
+        # 必须是“回复某条消息”的场景，才触发
+        comps = event.get_messages() or []
+        if not any(isinstance(c, Reply) for c in comps):
+            return
+
+        rec = self._wm_get_pick_cache(event)
+        if not rec:
+            return
+
+        text = (event.get_message_str() or "").strip()
+        try:
+            idx = int(text)
+        except Exception:
+            return
+
+        rows = rec.get("rows")
+        if not isinstance(rows, list) or not rows:
+            return
+
+        if idx < 1 or idx > len(rows):
+            yield event.plain_result(f"请输入 1~{len(rows)} 的数字。")
+            return
+
+        row = rows[idx - 1]
+        if not isinstance(row, dict):
+            return
+        row_name = row.get("name")
+        name = row_name.strip() if isinstance(row_name, str) else ""
+        platinum = row.get("platinum")
+        if not name or not isinstance(platinum, int):
+            return
+
+        item_name_en = rec.get("item_name_en") if isinstance(rec.get("item_name_en"), str) else ""
+        order_type = rec.get("order_type") if isinstance(rec.get("order_type"), str) else "sell"
+
+        # 在 sell 列表里，你是向对方“买”；在 buy 列表里，你是向对方“卖”
+        verb = "buy" if order_type == "sell" else "sell"
+        whisper = (
+            f"/w {name} Hi! I want to {verb}: \"{item_name_en}\" "
+            f"for {platinum} platinum. (warframe.market)"
+        )
+        yield event.plain_result(whisper)
 
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
