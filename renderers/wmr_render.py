@@ -765,9 +765,8 @@ def _render_image(
 
     x = margin
     y = margin
-    weapon_badge: Image.Image | None = None
     if weapon_img is not None:
-        weapon_badge = _circle_avatar(weapon_img, size=96)
+        bg.alpha_composite(_circle_avatar(weapon_img, size=96), (x, y + 10))
         x += 96 + 16
 
     max_title_w = width - margin - x
@@ -793,7 +792,7 @@ def _render_image(
     row_x1 = width - margin
     radius = 14
 
-    card_alpha = 240 if weapon_badge is not None else 255
+    card_alpha = 255
 
     for i, r in enumerate(rows):
         row_y = start_y + i * (row_h + row_gap)
@@ -924,11 +923,7 @@ def _render_image(
             font=font_title,
         )
 
-    # Composite weapon badge last so it can overlap the content area slightly.
-    if weapon_badge is not None:
-        overlap_into_row = 10
-        badge_y = start_y + overlap_into_row - 96
-        bg.alpha_composite(weapon_badge, (margin, int(badge_y)))
+    # Weapon badge stays inside the header area (no overlap into content).
 
     out = io.BytesIO()
     bg.convert("RGB").save(out, format="PNG", optimize=True)

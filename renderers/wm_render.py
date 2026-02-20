@@ -276,9 +276,8 @@ def _render_image(
     # Header
     x = margin
     y = margin
-    item_badge: Image.Image | None = None
     if item_avatar_img is not None:
-        item_badge = _circle_avatar(item_avatar_img, size=96)
+        bg.alpha_composite(_circle_avatar(item_avatar_img, size=96), (x, y + 10))
         x += 96 + 16
 
     # 标题换行截断（尽量不溢出）
@@ -307,7 +306,7 @@ def _render_image(
     row_x1 = width - margin
     radius = 14
 
-    card_alpha = 240 if item_badge is not None else 255
+    card_alpha = 255
 
     for i, (price, qty, player, status, avatar_img) in enumerate(rows):
         row_y = start_y + i * (row_h + row_gap)
@@ -382,11 +381,7 @@ def _render_image(
                 font=font_meta,
             )
 
-    # Composite item badge last so it can overlap the content area slightly.
-    if item_badge is not None:
-        overlap_into_row = 10
-        badge_y = start_y + overlap_into_row - 96
-        bg.alpha_composite(item_badge, (margin, int(badge_y)))
+    # Item badge stays inside the header area (no overlap into content).
 
     out = io.BytesIO()
     bg.convert("RGB").save(out, format="PNG")
