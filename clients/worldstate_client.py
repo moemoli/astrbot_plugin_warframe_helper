@@ -15,7 +15,7 @@ from .public_export_client import PublicExportClient
 Platform = Literal["pc", "ps4", "xb1", "swi"]
 
 
-OFFICIAL_WORLDSTATE_URL = "https://content.warframe.com/dynamic/worldState.php"
+OFFICIAL_WORLDSTATE_URL = "https://api.warframe.com/cdn/worldState.php"
 
 
 def _now_utc() -> datetime:
