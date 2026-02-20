@@ -13,9 +13,8 @@ from PIL import Image, ImageDraw, ImageFont
 from astrbot.api import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
-from .market_client import MarketOrder
-from .term_mapping import MarketItem
-
+from ..clients.market_client import MarketOrder
+from ..mappers.term_mapping import MarketItem
 
 WARFRAME_MARKET_ASSETS_BASE_URL = "https://warframe.market/static/assets/"
 
@@ -60,7 +59,7 @@ def _load_font(
     candidates: list[str] = []
 
     # 1) 插件自带字体（优先）
-    fonts_dir = Path(__file__).resolve().parent / "fonts"
+    fonts_dir = Path(__file__).resolve().parent.parent / "fonts"
     if fonts_dir.exists():
         if weight.lower() in {"medium", "bold", "semibold"}:
             candidates.append(str(fonts_dir / "NotoSansHans-Medium.otf"))
@@ -96,7 +95,9 @@ def _load_font(
     return ImageFont.load_default()
 
 
-def _open_image_rgba(image_bytes: bytes, *, size: tuple[int, int]) -> Image.Image | None:
+def _open_image_rgba(
+    image_bytes: bytes, *, size: tuple[int, int]
+) -> Image.Image | None:
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
         img = img.resize(size, Image.Resampling.LANCZOS)
@@ -129,7 +130,12 @@ def _placeholder_avatar(*, size: int = 48) -> Image.Image:
     bbox = d.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
-    d.text(((size - tw) / 2, (size - th) / 2 - 2), text, fill=(120, 120, 120, 255), font=font)
+    d.text(
+        ((size - tw) / 2, (size - th) / 2 - 2),
+        text,
+        fill=(120, 120, 120, 255),
+        font=font,
+    )
     return _circle_avatar(img, size=size)
 
 
@@ -312,7 +318,12 @@ def _render_image(
         # 价格稍微用强调色，提升可读性
         d.text((price_x, name_y), price_text, fill=(37, 99, 235, 255), font=font_name)
         if qty_text:
-            d.text((price_x, name_y + 30), qty_text, fill=(107, 114, 128, 255), font=font_meta)
+            d.text(
+                (price_x, name_y + 30),
+                qty_text,
+                fill=(107, 114, 128, 255),
+                font=font_meta,
+            )
 
     out = io.BytesIO()
     bg.convert("RGB").save(out, format="PNG")
@@ -351,7 +362,9 @@ async def render_wm_orders_image_to_file(
             item_img = _open_image_rgba(item_bytes, size=(96, 96))
 
     # 并发下载头像
-    avatar_urls: list[str | None] = [(_asset_url(o.avatar) if o.avatar else None) for o in orders[:limit]]
+    avatar_urls: list[str | None] = [
+        (_asset_url(o.avatar) if o.avatar else None) for o in orders[:limit]
+    ]
 
     async def dl(url: str | None) -> bytes | None:
         if not url:
