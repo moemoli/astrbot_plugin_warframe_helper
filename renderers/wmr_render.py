@@ -844,45 +844,45 @@ def _render_image(
         rr_val = r.get("rr")
         pol_val = r.get("polarity")
 
-        cur_x = name_x
-        remain = max_left_w
+        # Fixed columns so polarity & rerolls align vertically across rows.
+        mr_x = name_x
+        icon_size = 18
+        mr_col_w = 70
+        pol_col_w = icon_size + 14
+        pol_x = mr_x + mr_col_w
+        rr_x = pol_x + pol_col_w
 
-        if mr_val is not None:
+        mr_max_w = max(0, pol_x - mr_x - 8)
+        rr_max_w = max(0, right_x - rr_x)
+
+        if mr_val is not None and mr_max_w > 0:
             mr_text = f"MR{int(mr_val)}"
-            mr_text = _truncate_text(d, mr_text, font=font_meta, max_w=remain)
+            mr_text = _truncate_text(d, mr_text, font=font_meta, max_w=mr_max_w)
             if mr_text:
-                d.text((cur_x, meta_y), mr_text, fill=color_meta, font=font_meta)
-                w = _text_w(d, mr_text, font=font_meta)
-                cur_x += w + 14
-                remain = max(0, remain - w - 14)
+                d.text((mr_x, meta_y), mr_text, fill=color_meta, font=font_meta)
 
-        # Polarity as icon when possible.
-        if pol_val and remain > 0:
-            icon_size = 18
+        if pol_val and rr_x < right_x:
             pol_key = str(pol_val).strip().lower()
             icon = (polarity_icons or {}).get(pol_key)
-            if (
-                icon is not None
-                and remain >= icon_size
-                and icon.getbbox() is not None
-            ):
-                bg.alpha_composite(icon, (int(cur_x), int(meta_y + 2)))
-                cur_x += icon_size + 14
-                remain = max(0, remain - icon_size - 14)
+            if icon is not None and icon.getbbox() is not None:
+                bg.alpha_composite(icon, (int(pol_x), int(meta_y + 2)))
             elif pol_key and pol_key not in _WFM_POLARITY_ICONS:
+                # Keep non-offline polarities readable.
                 pol_text = f"极性{_fmt_polarity(pol_key)}"
-                pol_text = _truncate_text(d, pol_text, font=font_meta, max_w=remain)
+                pol_text = _truncate_text(
+                    d,
+                    pol_text,
+                    font=font_meta,
+                    max_w=max(0, rr_x - pol_x - 8),
+                )
                 if pol_text:
-                    d.text((cur_x, meta_y), pol_text, fill=color_meta, font=font_meta)
-                    w = _text_w(d, pol_text, font=font_meta)
-                    cur_x += w + 14
-                    remain = max(0, remain - w - 14)
+                    d.text((pol_x, meta_y), pol_text, fill=color_meta, font=font_meta)
 
-        if rr_val is not None and remain > 0:
+        if rr_val is not None and rr_max_w > 0:
             rr_text = f"洗练{int(rr_val)}"
-            rr_text = _truncate_text(d, rr_text, font=font_meta, max_w=remain)
+            rr_text = _truncate_text(d, rr_text, font=font_meta, max_w=rr_max_w)
             if rr_text:
-                d.text((cur_x, meta_y), rr_text, fill=color_meta, font=font_meta)
+                d.text((rr_x, meta_y), rr_text, fill=color_meta, font=font_meta)
 
         pos_attrs = r.get("pos_attrs")
         neg_attrs = r.get("neg_attrs")
