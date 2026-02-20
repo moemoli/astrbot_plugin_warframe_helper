@@ -34,6 +34,11 @@ class WarframeRivenWeaponMapper:
     _BUILTIN_WEAPON_ALIASES: dict[str, str] = {
         # PublicExport zh name: 绝路 (English: RUBICO)
         "绝路": "rubico",
+        # warframe.market riven items: Shedu
+        "舍杜": "shedu",
+        # warframe.market riven items: Kuva Bramma
+        "布拉玛": "kuva_bramma",
+        "赤毒布拉玛": "kuva_bramma",
     }
 
     def __init__(

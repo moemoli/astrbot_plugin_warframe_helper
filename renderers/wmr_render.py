@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import io
 import os
-import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +14,7 @@ from astrbot.api import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from ..clients.market_client import RivenAttribute, RivenAuction
+from ..constants import RIVEN_STAT_CN
 from ..mappers.riven_mapping import RivenWeapon
 
 WARFRAME_MARKET_ASSETS_BASE_URL = "https://warframe.market/static/assets/"
@@ -169,34 +169,60 @@ def _linear_gradient(
     return img
 
 
-_STAT_ZH: dict[str, str] = {
-    "critical_chance": "暴击率",
-    "critical_damage": "暴击伤害",
-    "multishot": "多重射击",
-    "base_damage_/_melee_damage": "伤害",
+_STAT_CN: dict[str, str] = {
+    **RIVEN_STAT_CN,
+    # More common riven stats not covered by shared constants
     "attack_speed": "攻速",
+    "fire_rate": "射速",
     "fire_rate_/_attack_speed": "射速/攻速",
-    "toxin_damage": "毒",
-    "cold_damage": "冰",
-    "heat_damage": "火",
-    "electric_damage": "电",
-    "puncture_damage": "穿刺",
-    "slash_damage": "切割",
-    "impact_damage": "冲击",
-    "ammo_maximum": "弹药上限",
-    "magazine_capacity": "弹匣容量",
-    "reload_speed": "装填速度",
-    "zoom": "变焦",
-    "damage_vs_grineer": "对Grineer伤害",
-    "damage_vs_corpus": "对Corpus伤害",
-    "damage_vs_infested": "对Infested伤害",
+    "status_chance": "触发几率",
+    "status_duration": "触发持续时间",
+    "punch_through": "穿透",
     "projectile_speed": "弹道速度",
+    "flight_speed": "弹道速度",
+    "recoil": "后坐力",
+    "accuracy": "精准度",
     "range": "范围",
+    "combo_duration": "连击持续时间",
+    "initial_combo": "初始连击",
+    "finisher_damage": "处决伤害",
+    "melee_damage": "近战伤害",
+    "slide_attack_critical_chance": "滑攻击暴击率",
+    "critical_chance_on_slide_attack": "滑攻击暴击率",
+    "channeling_efficiency": "引导效率",
+    "channeling_damage": "引导伤害",
 }
 
 
+def _truncate_text(
+    draw: ImageDraw.ImageDraw, text: str, *, font: ImageFont.ImageFont, max_w: int
+) -> str:
+    s = str(text or "")
+    if not s or max_w <= 0:
+        return ""
+    bbox = draw.textbbox((0, 0), s, font=font)
+    if (bbox[2] - bbox[0]) <= max_w:
+        return s
+
+    lo, hi = 0, len(s)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        t = s[:mid].rstrip() + "…"
+        bbox = draw.textbbox((0, 0), t, font=font)
+        if (bbox[2] - bbox[0]) <= max_w:
+            lo = mid + 1
+        else:
+            hi = mid
+
+    t = s[: max(0, lo - 1)].rstrip() + "…"
+    bbox = draw.textbbox((0, 0), t, font=font)
+    if (bbox[2] - bbox[0]) <= max_w:
+        return t
+    return ""
+
+
 def _fmt_attr(a: RivenAttribute) -> str:
-    label = _STAT_ZH.get(a.url_name, a.url_name)
+    label = _STAT_CN.get(a.url_name, a.url_name)
     sign = "+" if a.positive else "-"
 
     # 部分字段 value 是倍率（0.74），部分是百分比（146.2）。这里用启发式：
@@ -233,7 +259,7 @@ def _render_image(
 ) -> bytes:
     margin = 24
     header_h = 132
-    row_h = 104
+    row_h = 124
     avatar_size = 52
     row_gap = 10
 
@@ -247,6 +273,9 @@ def _render_image(
     font_name = _load_font(24, weight="medium")
     font_meta = _load_font(20, weight="regular")
     font_attr = _load_font(18, weight="regular")
+
+    color_pos = (34, 197, 94, 255)
+    color_neg = (239, 68, 68, 255)
 
     header_grad = _linear_gradient(
         size=(width, margin + header_h + 8),
@@ -313,37 +342,48 @@ def _render_image(
         name = str(r.get("name") or "unknown")
         status_dot = _status_dot_color(status)
         name_x = row_x0 + 18 + avatar_size + 14
-        name_y = row_y + 18
-
-        d.text((name_x, name_y), name, fill=(15, 23, 42, 255), font=font_name)
-        bbox = d.textbbox((0, 0), name, font=font_name)
-        dot_x = name_x + (bbox[2] - bbox[0]) + 10
-        dot_y = name_y + 10
-        d.ellipse((dot_x, dot_y, dot_x + 10, dot_y + 10), fill=status_dot)
-
-        meta = r.get("meta") or ""
-        if meta:
-            d.text((name_x, row_y + 50), meta, fill=(71, 85, 105, 255), font=font_meta)
-
-        attrs = r.get("attrs") or ""
-        if attrs:
-            # 简单换行：按逗号断开
-            parts = [p.strip() for p in re.split(r"[,，]", str(attrs)) if p.strip()]
-            line1 = "，".join(parts[:2])
-            line2 = "，".join(parts[2:4])
-            d.text((name_x, row_y + 74), line1, fill=(51, 65, 85, 255), font=font_attr)
-            if line2:
-                d.text(
-                    (name_x + 2, row_y + 94),
-                    line2,
-                    fill=(51, 65, 85, 255),
-                    font=font_attr,
-                )
-
         price = int(r.get("price") or 0)
         price_text = f"{price}p"
         bbox_p = d.textbbox((0, 0), price_text, font=font_title)
         pw = bbox_p[2] - bbox_p[0]
+        right_x = row_x1 - 18 - pw - 16
+        max_left_w = max(10, right_x - name_x)
+
+        name_y = row_y + 16
+        name_text = _truncate_text(d, name, font=font_name, max_w=max_left_w)
+        d.text((name_x, name_y), name_text, fill=(15, 23, 42, 255), font=font_name)
+        bbox = d.textbbox((0, 0), name_text, font=font_name)
+        dot_x = name_x + (bbox[2] - bbox[0]) + 10
+        dot_y = name_y + 10
+        if dot_x + 10 < right_x:
+            d.ellipse((dot_x, dot_y, dot_x + 10, dot_y + 10), fill=status_dot)
+
+        meta = str(r.get("meta") or "")
+        if meta:
+            meta_text = _truncate_text(d, meta, font=font_meta, max_w=max_left_w)
+            d.text(
+                (name_x, row_y + 46),
+                meta_text,
+                fill=(71, 85, 105, 255),
+                font=font_meta,
+            )
+
+        pos_attrs = r.get("pos_attrs")
+        neg_attrs = r.get("neg_attrs")
+        pos_list = [str(x) for x in pos_attrs] if isinstance(pos_attrs, list) else []
+        neg_list = [str(x) for x in neg_attrs] if isinstance(neg_attrs, list) else []
+
+        pos_line = "，".join([p for p in pos_list if p.strip()])
+        neg_line = "，".join([p for p in neg_list if p.strip()])
+        if not neg_line:
+            neg_line = "无负面词条"
+
+        pos_text = _truncate_text(d, pos_line, font=font_attr, max_w=max_left_w)
+        neg_text = _truncate_text(d, neg_line, font=font_attr, max_w=max_left_w)
+        if pos_text:
+            d.text((name_x, row_y + 72), pos_text, fill=color_pos, font=font_attr)
+        d.text((name_x, row_y + 94), neg_text, fill=color_neg, font=font_attr)
+
         d.text(
             (row_x1 - 18 - pw, row_y + 30),
             price_text,
@@ -416,7 +456,8 @@ async def render_wmr_auctions_image_to_file(
 
         pos = [x for x in a.attributes if x.positive]
         neg = [x for x in a.attributes if not x.positive]
-        attr_text = "，".join([_fmt_attr(x) for x in (pos + neg)][:4])
+        pos_texts = [_fmt_attr(x) for x in pos]
+        neg_texts = [_fmt_attr(x) for x in neg]
 
         rows.append(
             {
@@ -424,7 +465,8 @@ async def render_wmr_auctions_image_to_file(
                 "name": name,
                 "status": status,
                 "meta": "  ".join(meta_parts),
-                "attrs": attr_text,
+                "pos_attrs": pos_texts,
+                "neg_attrs": neg_texts,
                 "avatar": avatars[i] if i < len(avatars) else None,
             }
         )
