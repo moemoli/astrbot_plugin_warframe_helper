@@ -3,11 +3,10 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-
-import aiohttp
 from PIL import Image, ImageDraw, ImageFont
 
 from astrbot.api import logger
@@ -15,6 +14,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from ..clients.market_client import RivenAttribute, RivenAuction
 from ..constants import RIVEN_STAT_CN
+from ..http_utils import fetch_bytes
 from ..mappers.riven_mapping import RivenWeapon
 
 WARFRAME_MARKET_ASSETS_BASE_URL = "https://warframe.market/static/assets/"
@@ -29,6 +29,285 @@ _polarity_icon_cache: dict[tuple[str, int], Image.Image] = {}
 _polarity_svg_cache: dict[str, str] = {}
 
 _POLARITY_ICON_COLOR = (71, 85, 105, 255)
+
+
+_SVG_NUMBER_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?")
+
+
+def _parse_viewbox(svg_text: str) -> tuple[float, float, float, float] | None:
+    m = re.search(r'viewBox\s*=\s*"([^"]+)"', svg_text)
+    if not m:
+        return None
+    parts = [p for p in m.group(1).replace(",", " ").split() if p]
+    if len(parts) != 4:
+        return None
+    try:
+        x, y, w, h = (float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
+    except Exception:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return x, y, w, h
+
+
+def _extract_path_ds(svg_text: str) -> list[str]:
+    # Support multiple <path ... d="..."/> inside one svg.
+    return [m.group(1) for m in re.finditer(r'<path[^>]*\sd\s*=\s*"([^"]+)"', svg_text)]
+
+
+def _tokenize_svg_path(d: str) -> list[str | float]:
+    tokens: list[str | float] = []
+    i = 0
+    n = len(d)
+    while i < n:
+        ch = d[i]
+        if ch.isspace() or ch == ",":
+            i += 1
+            continue
+        if ch in "MmLlCcSsZzHhVv":
+            tokens.append(ch)
+            i += 1
+            continue
+        m = _SVG_NUMBER_RE.match(d, i)
+        if not m:
+            i += 1
+            continue
+        try:
+            tokens.append(float(m.group(0)))
+        except Exception:
+            pass
+        i = m.end()
+    return tokens
+
+
+def _cubic_point(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    p3: tuple[float, float],
+    t: float,
+) -> tuple[float, float]:
+    # Bernstein polynomial form.
+    x0, y0 = p0
+    x1, y1 = p1
+    x2, y2 = p2
+    x3, y3 = p3
+    mt = 1.0 - t
+    a = mt * mt * mt
+    b = 3.0 * mt * mt * t
+    c = 3.0 * mt * t * t
+    d = t * t * t
+    return (
+        a * x0 + b * x1 + c * x2 + d * x3,
+        a * y0 + b * y1 + c * y2 + d * y3,
+    )
+
+
+def _svg_path_to_polygons(d: str) -> list[list[tuple[float, float]]]:
+    toks = _tokenize_svg_path(d)
+    polys: list[list[tuple[float, float]]] = []
+
+    cmd: str | None = None
+    i = 0
+    cx = cy = 0.0
+    sx = sy = 0.0
+    cur: list[tuple[float, float]] = []
+    prev_cmd: str | None = None
+    prev_c2: tuple[float, float] | None = None
+
+    def flush() -> None:
+        nonlocal cur
+        if cur:
+            polys.append(cur)
+            cur = []
+
+    def ensure_start() -> None:
+        if not cur:
+            cur.append((cx, cy))
+
+    while i < len(toks):
+        t = toks[i]
+        if isinstance(t, str):
+            cmd = t
+            i += 1
+            continue
+        if cmd is None:
+            i += 1
+            continue
+
+        # Only implement the subset we actually need.
+        if cmd in {"M", "m"}:
+            if i + 1 >= len(toks) or not isinstance(toks[i + 1], float):
+                break
+            x = float(toks[i])
+            y = float(toks[i + 1])
+            i += 2
+            if cmd == "m":
+                x += cx
+                y += cy
+            flush()
+            cx, cy = x, y
+            sx, sy = x, y
+            cur.append((cx, cy))
+            prev_c2 = None
+            prev_cmd = cmd
+
+            # Subsequent pairs are treated as implicit lineto.
+            cmd = "L" if cmd == "M" else "l"
+            continue
+
+        if cmd in {"L", "l"}:
+            if i + 1 >= len(toks) or not isinstance(toks[i + 1], float):
+                break
+            x = float(toks[i])
+            y = float(toks[i + 1])
+            i += 2
+            if cmd == "l":
+                x += cx
+                y += cy
+            ensure_start()
+            cx, cy = x, y
+            cur.append((cx, cy))
+            prev_c2 = None
+            prev_cmd = cmd
+            continue
+
+        if cmd in {"H", "h"}:
+            x = float(toks[i])
+            i += 1
+            if cmd == "h":
+                x += cx
+            ensure_start()
+            cx = x
+            cur.append((cx, cy))
+            prev_c2 = None
+            prev_cmd = cmd
+            continue
+
+        if cmd in {"V", "v"}:
+            y = float(toks[i])
+            i += 1
+            if cmd == "v":
+                y += cy
+            ensure_start()
+            cy = y
+            cur.append((cx, cy))
+            prev_c2 = None
+            prev_cmd = cmd
+            continue
+
+        if cmd in {"C", "c"}:
+            if i + 5 >= len(toks) or not all(isinstance(toks[i + k], float) for k in range(6)):
+                break
+            x1, y1, x2, y2, x, y = (float(toks[i]), float(toks[i + 1]), float(toks[i + 2]), float(toks[i + 3]), float(toks[i + 4]), float(toks[i + 5]))
+            i += 6
+            if cmd == "c":
+                x1 += cx
+                y1 += cy
+                x2 += cx
+                y2 += cy
+                x += cx
+                y += cy
+            ensure_start()
+            p0 = (cx, cy)
+            p1 = (x1, y1)
+            p2 = (x2, y2)
+            p3 = (x, y)
+            steps = 22
+            for s in range(1, steps + 1):
+                cur.append(_cubic_point(p0, p1, p2, p3, s / steps))
+            cx, cy = x, y
+            prev_c2 = (x2, y2)
+            prev_cmd = cmd
+            continue
+
+        if cmd in {"S", "s"}:
+            if i + 3 >= len(toks) or not all(isinstance(toks[i + k], float) for k in range(4)):
+                break
+            x2, y2, x, y = (float(toks[i]), float(toks[i + 1]), float(toks[i + 2]), float(toks[i + 3]))
+            i += 4
+            if cmd == "s":
+                x2 += cx
+                y2 += cy
+                x += cx
+                y += cy
+            if prev_cmd in {"C", "c", "S", "s"} and prev_c2 is not None:
+                x1 = 2.0 * cx - prev_c2[0]
+                y1 = 2.0 * cy - prev_c2[1]
+            else:
+                x1, y1 = cx, cy
+            ensure_start()
+            p0 = (cx, cy)
+            p1 = (x1, y1)
+            p2 = (x2, y2)
+            p3 = (x, y)
+            steps = 22
+            for s in range(1, steps + 1):
+                cur.append(_cubic_point(p0, p1, p2, p3, s / steps))
+            cx, cy = x, y
+            prev_c2 = (x2, y2)
+            prev_cmd = cmd
+            continue
+
+        if cmd in {"Z", "z"}:
+            if cur:
+                cur.append((sx, sy))
+            flush()
+            cx, cy = sx, sy
+            prev_c2 = None
+            prev_cmd = cmd
+            i += 1
+            continue
+
+        # Unsupported command: skip one token to avoid infinite loop.
+        i += 1
+
+    flush()
+    return polys
+
+
+def _rasterize_svg_paths_to_icon(svg_text: str, *, size: int) -> Image.Image | None:
+    vb = _parse_viewbox(svg_text)
+    ds = _extract_path_ds(svg_text)
+    if vb is None or not ds:
+        return None
+
+    vb_x, vb_y, vb_w, vb_h = vb
+    s = max(8, int(size))
+    oversample = 4
+    target = s * oversample
+    pad = 2 * oversample
+
+    scale = (target - 2 * pad) / max(vb_w, vb_h)
+    if scale <= 0:
+        return None
+
+    content_w = vb_w * scale
+    content_h = vb_h * scale
+    off_x = (target - content_w) / 2.0 - vb_x * scale
+    off_y = (target - content_h) / 2.0 - vb_y * scale
+
+    mask = Image.new("L", (target, target), 0)
+    md = ImageDraw.Draw(mask)
+
+    for d in ds:
+        for poly in _svg_path_to_polygons(d):
+            if len(poly) < 3:
+                continue
+            pts = [
+                (float(x) * scale + off_x, float(y) * scale + off_y)
+                for (x, y) in poly
+            ]
+            try:
+                md.polygon(pts, fill=255)
+            except Exception:
+                continue
+
+    mask = mask.resize((s, s), Image.Resampling.LANCZOS)
+
+    icon = Image.new("RGBA", (s, s), _POLARITY_ICON_COLOR)
+    icon.putalpha(mask)
+    return icon
 
 
 def _plugin_root() -> Path:
@@ -59,9 +338,7 @@ async def _get_polarity_icon(
 ) -> Image.Image | None:
     """Get polarity icon image from locally vendored SVGs.
 
-    This function is intentionally offline-only: it never downloads assets at runtime.
-    If the SVG files are missing or cairosvg isn't available, it returns None and the
-    caller should fall back to text.
+    Offline-only: it never downloads assets at runtime.
     """
 
     p = (polarity or "").strip().lower()
@@ -82,36 +359,17 @@ async def _get_polarity_icon(
     if not svg_text:
         svg_path = _polarity_svg_path(p)
         if not svg_path.exists() or svg_path.stat().st_size <= 0:
-            return None
+            # Known polarity but missing asset: return a transparent placeholder.
+            return Image.new("RGBA", (s, s), (0, 0, 0, 0))
         try:
             svg_text = svg_path.read_text(encoding="utf-8")
             _polarity_svg_cache[p] = svg_text
         except Exception:
-            return None
+            return Image.new("RGBA", (s, s), (0, 0, 0, 0))
 
-    # Rasterize with cairosvg if available.
-    try:
-        from cairosvg import svg2png  # type: ignore
-    except Exception:
-        return None
-
-    try:
-        png_bytes = svg2png(
-            bytestring=svg_text.encode("utf-8"),
-            output_width=s,
-            output_height=s,
-        )
-        raw = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
-    except Exception:
-        return None
-
-    # Normalize icon color to meta gray.
-    try:
-        _, _, _, a = raw.split()
-        icon = Image.new("RGBA", (raw.width, raw.height), _POLARITY_ICON_COLOR)
-        icon.putalpha(a)
-    except Exception:
-        icon = raw
+    icon = _rasterize_svg_paths_to_icon(svg_text, size=s)
+    if icon is None:
+        icon = Image.new("RGBA", (s, s), (0, 0, 0, 0))
 
     _polarity_icon_cache[cache_key] = icon
     return icon
@@ -122,16 +380,7 @@ async def _download_bytes(url: str, *, timeout_sec: float = 10.0) -> bytes | Non
         "User-Agent": "AstrBot/warframe_helper (+https://github.com/Soulter/AstrBot)",
         "Accept": "image/*,*/*;q=0.8",
     }
-    timeout = aiohttp.ClientTimeout(total=timeout_sec)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as s:
-            async with s.get(url, headers=headers) as resp:
-                if resp.status != 200:
-                    return None
-                return await resp.read()
-    except Exception as exc:
-        logger.debug(f"download failed: {url}: {exc!s}")
-        return None
+    return await fetch_bytes(url, timeout_sec=timeout_sec, headers=headers)
 
 
 def _load_font(
@@ -502,21 +751,23 @@ def _render_image(
 
     header_size = (width, margin + header_h + 8)
     if weapon_bg_img is not None:
-        icon_bg = _resize_cover(weapon_bg_img, size=header_size)
-        icon_bg = _apply_alpha(icon_bg, factor=0.28)
+        # Use the weapon background across the whole canvas.
+        icon_bg = _resize_cover(weapon_bg_img, size=(width, height))
+        icon_bg = _apply_alpha(icon_bg, factor=0.36)
         bg.alpha_composite(icon_bg, (0, 0))
 
     header_grad = _linear_gradient(
         size=header_size,
-        left=(239, 246, 255, 232),
-        right=(245, 243, 255, 232),
+        left=(239, 246, 255, 205),
+        right=(245, 243, 255, 205),
     )
     bg.alpha_composite(header_grad, (0, 0))
 
     x = margin
     y = margin
+    weapon_badge: Image.Image | None = None
     if weapon_img is not None:
-        bg.alpha_composite(_circle_avatar(weapon_img, size=96), (x, y + 10))
+        weapon_badge = _circle_avatar(weapon_img, size=96)
         x += 96 + 16
 
     max_title_w = width - margin - x
@@ -542,6 +793,8 @@ def _render_image(
     row_x1 = width - margin
     radius = 14
 
+    card_alpha = 240 if weapon_badge is not None else 255
+
     for i, r in enumerate(rows):
         row_y = start_y + i * (row_h + row_gap)
         status = r.get("status")
@@ -550,7 +803,7 @@ def _render_image(
         d.rounded_rectangle(
             (row_x0, row_y, row_x1, row_y + row_h),
             radius=radius,
-            fill=(255, 255, 255, 255),
+            fill=(255, 255, 255, card_alpha),
             outline=(226, 232, 240, 255),
             width=1,
         )
@@ -609,12 +862,16 @@ def _render_image(
             icon_size = 18
             pol_key = str(pol_val).strip().lower()
             icon = (polarity_icons or {}).get(pol_key)
-            if icon is not None and remain >= icon_size:
+            if (
+                icon is not None
+                and remain >= icon_size
+                and icon.getbbox() is not None
+            ):
                 bg.alpha_composite(icon, (int(cur_x), int(meta_y + 2)))
                 cur_x += icon_size + 14
                 remain = max(0, remain - icon_size - 14)
-            else:
-                pol_text = f"极性{_fmt_polarity(str(pol_val))}"
+            elif pol_key and pol_key not in _WFM_POLARITY_ICONS:
+                pol_text = f"极性{_fmt_polarity(pol_key)}"
                 pol_text = _truncate_text(d, pol_text, font=font_meta, max_w=remain)
                 if pol_text:
                     d.text((cur_x, meta_y), pol_text, fill=color_meta, font=font_meta)
@@ -666,6 +923,12 @@ def _render_image(
             fill=(37, 99, 235, 255),
             font=font_title,
         )
+
+    # Composite weapon badge last so it can overlap the content area slightly.
+    if weapon_badge is not None:
+        overlap_into_row = 10
+        badge_y = start_y + overlap_into_row - 96
+        bg.alpha_composite(weapon_badge, (margin, int(badge_y)))
 
     out = io.BytesIO()
     bg.convert("RGB").save(out, format="PNG", optimize=True)
@@ -749,8 +1012,8 @@ async def render_wmr_auctions_image_to_file(
     name = (weapon_display_name or weapon.item_name or "").strip() or weapon.item_name
     title = f"紫卡 {name}（{platform}） 前{limit}"
 
-    # Prefetch polarity icons (best-effort). If cairosvg isn't available or the icon
-    # can't be downloaded/rasterized, we fallback to text in rendering.
+    # Prefetch polarity icons (offline-only). Missing/invalid SVGs will result in a
+    # transparent placeholder instead of falling back to text.
     polarity_icons: dict[str, Image.Image] = {}
     unique_polarities = {
         (a.polarity or "").strip().lower()

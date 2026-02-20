@@ -38,6 +38,16 @@ AstrBot Warframe Helper 插件
 - 配置项：`unknown_abbrev_provider_id`
 - 含义：用于“未知简写解析”的聊天模型 Provider ID（为空则不启用 LLM 兜底）
 
+## 代理（可选）
+
+当你处于网络受限环境（例如需要科学上网）时，可为本插件单独配置代理。
+
+- 配置项：`proxy_url`
+- 含义：
+	- 为空：使用系统/环境代理（aiohttp `trust_env=True`，例如系统代理、`HTTP_PROXY/HTTPS_PROXY` 等）
+	- 非空：强制所有插件网络请求使用该代理
+- 示例：`http://127.0.0.1:7890`
+
 # 指令
 
 说明：
@@ -179,7 +189,7 @@ AstrBot Warframe Helper 插件
 - 位置：`data/plugins/astrbot_plugin_warframe_helper/assets/polarity/`
 - 文件：`madurai.svg` / `vazarin.svg` / `naramon.svg`
 
-插件运行时**不会**为极性图标下载任何网络资源（缺失时会自动回退为“极性文字”）。
+插件运行时**不会**为极性图标下载任何网络资源；并且会尽量渲染为图标（`madurai/vazarin/naramon` 缺失/解析失败时会显示为空白占位，不再回退为“极性文字”；其它极性仍可能以字母显示）。
 
 开发/修复资源时，可在 AstrBot 工程根目录执行一次：
 

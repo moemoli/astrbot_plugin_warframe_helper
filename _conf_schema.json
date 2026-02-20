@@ -1,4 +1,10 @@
 {
+  "proxy_url": {
+    "type": "string",
+    "default": "",
+    "description": "HTTP 代理（可选）",
+    "hint": "为空时使用系统/环境代理（aiohttp trust_env）。非空时将强制所有插件请求使用该代理。格式示例：http://127.0.0.1:7890"
+  },
   "unknown_abbrev_provider_id": {
     "type": "string",
     "default": "",

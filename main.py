@@ -28,6 +28,7 @@ from .helpers import (
     split_tokens,
     uniq_lower,
 )
+from .http_utils import set_proxy_url
 from .mappers.riven_mapping import WarframeRivenWeaponMapper
 from .mappers.riven_stats_mapping import WarframeRivenStatMapper
 from .mappers.term_mapping import WarframeTermMapper
@@ -44,6 +45,14 @@ class WarframeHelperPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context, config)
         self.config = config
+
+        try:
+            proxy_url = self.config.get("proxy_url") if self.config else None
+            set_proxy_url(proxy_url)
+        except Exception:
+            # Never fail plugin init due to proxy config.
+            set_proxy_url(None)
+
         self.term_mapper = WarframeTermMapper()
         self.riven_weapon_mapper = WarframeRivenWeaponMapper()
         self.riven_stat_mapper = WarframeRivenStatMapper()
@@ -868,17 +877,41 @@ class WarframeHelperPlugin(Star):
 
             return score
 
-        filtered.sort(
+        # Two-stage sorting:
+        # 1) Pick top N auctions by "fit to parameters".
+        #    If there are ties on the N-th score, break ties by online status & price.
+        # 2) Within the picked N, sort by online status & price for display.
+        limit = max(1, min(int(limit), 20))
+
+        scored: list[tuple[int, object]] = [(stat_fit_score(a), a) for a in filtered]
+        scored.sort(key=lambda x: -x[0])
+
+        if len(scored) <= limit:
+            picked = [a for _, a in scored]
+        else:
+            cutoff_score = scored[limit - 1][0]
+
+            higher: list[object] = [a for s, a in scored if s > cutoff_score]
+            equal: list[object] = [a for s, a in scored if s == cutoff_score]
+
+            need = max(0, limit - len(higher))
+            equal.sort(
+                key=lambda a: (
+                    presence_rank(getattr(a, "owner_status", None)),
+                    int(getattr(a, "buyout_price", 0) or 0),
+                    (getattr(a, "owner_name", "") or ""),
+                )
+            )
+            picked = higher + equal[:need]
+
+        picked.sort(
             key=lambda a: (
-                -stat_fit_score(a),
-                a.buyout_price,
-                presence_rank(a.owner_status),
-                (a.owner_name or ""),
+                presence_rank(getattr(a, "owner_status", None)),
+                int(getattr(a, "buyout_price", 0) or 0),
+                (getattr(a, "owner_name", "") or ""),
             )
         )
-
-        limit = max(1, min(int(limit), 20))
-        top = filtered[:limit]
+        top = cast(list, picked)
         if not top:
             yield event.plain_result("没有符合条件的一口价紫卡拍卖。")
             return

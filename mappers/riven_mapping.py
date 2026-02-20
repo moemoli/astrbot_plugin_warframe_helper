@@ -13,6 +13,8 @@ import aiohttp
 from astrbot.api import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
+from ..http_utils import fetch_json
+
 WARFRAME_MARKET_V1_BASE_URL = "https://api.warframe.market/v1"
 
 
@@ -184,16 +186,12 @@ class WarframeRivenWeaponMapper:
             "Accept": "application/json",
         }
 
-        try:
-            async with aiohttp.ClientSession(
-                timeout=self._timeout, trust_env=True
-            ) as s:
-                async with s.get(url, headers=headers) as resp:
-                    if resp.status != 200:
-                        return []
-                    payload = await resp.json()
-        except Exception as exc:
-            logger.warning(f"warframe.market riven items request failed: {exc!s}")
+        payload = await fetch_json(
+            url,
+            timeout_sec=float(getattr(self._timeout, "total", 10.0) or 10.0),
+            headers=headers,
+        )
+        if not isinstance(payload, dict):
             return []
 
         pl = payload.get("payload")

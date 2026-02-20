@@ -8,6 +8,39 @@ import aiohttp
 from astrbot.api import logger
 
 
+_proxy_url: str | None = None
+
+
+def set_proxy_url(proxy_url: str | None) -> None:
+    """Set plugin-level proxy url.
+
+    - If proxy_url is a non-empty string, all HTTP requests made via this module
+      will force using this proxy.
+    - If proxy_url is empty/None, requests will rely on system/environment proxy
+      settings (via aiohttp trust_env=True).
+    """
+
+    global _proxy_url
+    if proxy_url is None:
+        _proxy_url = None
+        return
+    p = str(proxy_url).strip()
+    _proxy_url = p if p else None
+
+
+def get_proxy_url() -> str | None:
+    return _proxy_url
+
+
+def _request_kwargs() -> dict[str, Any]:
+    """Build aiohttp per-request kwargs (proxy etc)."""
+
+    kw: dict[str, Any] = {}
+    if _proxy_url:
+        kw["proxy"] = _proxy_url
+    return kw
+
+
 def _default_headers() -> dict[str, str]:
     return {
         "User-Agent": "AstrBot/warframe_helper (+https://github.com/Soulter/AstrBot)",
@@ -33,11 +66,13 @@ async def fetch_bytes(
     req_headers = {**_default_headers(), **(headers or {})}
     timeout = aiohttp.ClientTimeout(total=float(timeout_sec))
 
+    req_kw = _request_kwargs()
+
     async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
         last_err: str | None = None
         for url in url_list:
             try:
-                async with session.get(url, headers=req_headers) as resp:
+                async with session.get(url, headers=req_headers, **req_kw) as resp:
                     if resp.status != 200:
                         last_err = f"{resp.status} {url}"
                         continue

@@ -6,14 +6,13 @@ import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-
-import aiohttp
 from PIL import Image, ImageDraw, ImageFont
 
 from astrbot.api import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from ..clients.market_client import MarketOrder
+from ..http_utils import fetch_bytes
 from ..mappers.term_mapping import MarketItem
 
 WARFRAME_MARKET_ASSETS_BASE_URL = "https://warframe.market/static/assets/"
@@ -33,16 +32,7 @@ async def _download_bytes(url: str, *, timeout_sec: float = 10.0) -> bytes | Non
         "User-Agent": "AstrBot/warframe_helper (+https://github.com/Soulter/AstrBot)",
         "Accept": "image/*,*/*;q=0.8",
     }
-    timeout = aiohttp.ClientTimeout(total=timeout_sec)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as s:
-            async with s.get(url, headers=headers) as resp:
-                if resp.status != 200:
-                    return None
-                return await resp.read()
-    except Exception as exc:
-        logger.debug(f"download failed: {url}: {exc!s}")
-        return None
+    return await fetch_bytes(url, timeout_sec=timeout_sec, headers=headers)
 
 
 def _load_font(
@@ -268,23 +258,27 @@ def _render_image(
 
     header_size = (width, margin + header_h + 8)
     if item_bg_img is not None:
-        icon_bg = _resize_cover(item_bg_img, size=header_size)
-        icon_bg = _apply_alpha(icon_bg, factor=0.28)
+        # Use the item background across the whole canvas.
+        # Keep it subtle but clearly visible.
+        icon_bg = _resize_cover(item_bg_img, size=(width, height))
+        icon_bg = _apply_alpha(icon_bg, factor=0.36)
         bg.alpha_composite(icon_bg, (0, 0))
 
     # Header: 轻渐变背景（半透明，遮住背景图标但保留层次）
     header_grad = _linear_gradient(
         size=header_size,
-        left=(239, 246, 255, 232),
-        right=(245, 243, 255, 232),
+        # Increase transparency to make the background less washed out.
+        left=(239, 246, 255, 205),
+        right=(245, 243, 255, 205),
     )
     bg.alpha_composite(header_grad, (0, 0))
 
     # Header
     x = margin
     y = margin
+    item_badge: Image.Image | None = None
     if item_avatar_img is not None:
-        bg.alpha_composite(_circle_avatar(item_avatar_img, size=96), (x, y + 10))
+        item_badge = _circle_avatar(item_avatar_img, size=96)
         x += 96 + 16
 
     # 标题换行截断（尽量不溢出）
@@ -313,6 +307,8 @@ def _render_image(
     row_x1 = width - margin
     radius = 14
 
+    card_alpha = 240 if item_badge is not None else 255
+
     for i, (price, qty, player, status, avatar_img) in enumerate(rows):
         row_y = start_y + i * (row_h + row_gap)
 
@@ -322,7 +318,7 @@ def _render_image(
         d.rounded_rectangle(
             (row_x0, row_y, row_x1, row_y + row_h),
             radius=radius,
-            fill=(255, 255, 255, 255),
+            fill=(255, 255, 255, card_alpha),
             outline=(226, 232, 240, 255),
             width=1,
         )
@@ -385,6 +381,12 @@ def _render_image(
                 fill=(107, 114, 128, 255),
                 font=font_meta,
             )
+
+    # Composite item badge last so it can overlap the content area slightly.
+    if item_badge is not None:
+        overlap_into_row = 10
+        badge_y = start_y + overlap_into_row - 96
+        bg.alpha_composite(item_badge, (margin, int(badge_y)))
 
     out = io.BytesIO()
     bg.convert("RGB").save(out, format="PNG")

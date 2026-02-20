@@ -16,6 +16,8 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_temp_path,
 )
 
+from ..http_utils import fetch_json
+
 WARFRAME_MARKET_V2_BASE_URL = "https://api.warframe.market/v2"
 
 
@@ -499,16 +501,12 @@ class WarframeTermMapper:
             "Accept": "application/json",
         }
 
-        try:
-            async with aiohttp.ClientSession(
-                timeout=self._timeout, trust_env=True
-            ) as s:
-                async with s.get(url, headers=headers) as resp:
-                    if resp.status != 200:
-                        return None
-                    payload = await resp.json()
-        except Exception as exc:
-            logger.warning(f"warframe.market request failed: {exc!s}")
+        payload = await fetch_json(
+            url,
+            timeout_sec=float(getattr(self._timeout, "total", 10.0) or 10.0),
+            headers=headers,
+        )
+        if not isinstance(payload, dict):
             return None
 
         try:
