@@ -1,3 +1,4 @@
+import json
 import re
 import time
 from typing import cast
@@ -526,8 +527,16 @@ class MyPlugin(Star):
                 mastery_rank_min = int(m.group(1))
                 continue
 
-            # polarity: v槽/d槽/-槽/r槽
+            # polarity: support common forms
+            # - v槽/d槽/-槽/r槽
+            # - v极性/d极性/-极性/r极性
+            # - 极性v/极性d/极性-/极性r
+            # - madurai/vazarin/naramon/zenurik
             m = re.fullmatch(r"([vd\-r])槽", t_norm)
+            if not m:
+                m = re.fullmatch(r"([vd\-r])极性", t_norm)
+            if not m:
+                m = re.fullmatch(r"极性([vd\-r])", t_norm)
             if m:
                 p = m.group(1)
                 if p == "v":
@@ -540,9 +549,35 @@ class MyPlugin(Star):
                     polarity = "zenurik"
                 continue
 
-            # shorthand: 双暴
+            if t_norm in {"madurai", "vazarin", "naramon", "zenurik"}:
+                polarity = t_norm
+                continue
+
+            # shorthand: composite token support, e.g. "双爆毒" -> 双暴 + 毒
             if "双暴" in t_norm or "双爆" in t_norm:
                 positive_stats.extend(["critical_chance", "critical_damage"])
+
+                rest_tok = t_norm.replace("双暴", "").replace("双爆", "")
+                # Common elemental single-char shorthands
+                if "毒" in rest_tok:
+                    positive_stats.append("toxin_damage")
+                if "火" in rest_tok:
+                    positive_stats.append("heat_damage")
+                if "冰" in rest_tok:
+                    positive_stats.append("cold_damage")
+                if "电" in rest_tok:
+                    positive_stats.append("electric_damage")
+                # A few other common shorthands
+                if "多重" in rest_tok:
+                    positive_stats.append("multishot")
+                if "伤害" in rest_tok:
+                    positive_stats.append("base_damage_/_melee_damage")
+                if "穿刺" in rest_tok:
+                    positive_stats.append("puncture_damage")
+                if "切割" in rest_tok:
+                    positive_stats.append("slash_damage")
+                if "冲击" in rest_tok:
+                    positive_stats.append("impact_damage")
                 continue
 
             # negative rules
@@ -580,6 +615,94 @@ class MyPlugin(Star):
         provider_id = (
             self.config.get("unknown_abbrev_provider_id") if self.config else ""
         )
+
+        await self.riven_stat_mapper.initialize()
+
+        async def ai_split_stat_token(token: str) -> list[str]:
+            """Use LLM to split a composite shorthand token into smaller stat tokens.
+
+            Example: "双爆毒" -> ["双爆", "毒"], "暴伤毒" -> ["暴伤", "毒"]
+            """
+
+            tok = (token or "").strip()
+            if not tok or not provider_id:
+                return []
+
+            system_prompt = (
+                "You split a Warframe Riven stat shorthand token into individual stat tokens. "
+                "Return JSON only."
+            )
+            prompt = (
+                "Split the following user token into 1~6 smaller stat tokens (Chinese or common abbreviations).\n"
+                "Rules:\n"
+                '- Output MUST be valid JSON: {"tokens": ["..."]}.\n'
+                "- Do NOT output explanations.\n"
+                "- Keep tokens minimal and meaningful for riven stat parsing.\n"
+                "Examples:\n"
+                '- "双爆毒" -> {"tokens":["双爆","毒"]}\n'
+                '- "暴伤多重" -> {"tokens":["暴伤","多重"]}\n'
+                f"Token: {tok}\n"
+                "JSON:"
+            )
+
+            try:
+                llm_resp = await self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=0,
+                    timeout=15,
+                )
+            except TypeError:
+                try:
+                    llm_resp = await self.context.llm_generate(
+                        chat_provider_id=provider_id,
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        temperature=0,
+                    )
+                except Exception:
+                    return []
+            except Exception:
+                return []
+
+            text = (llm_resp.completion_text or "").strip()
+            obj = None
+            try:
+                obj = json.loads(text)
+            except Exception:
+                m = re.search(r"\{[\s\S]*\}", text)
+                if m:
+                    try:
+                        obj = json.loads(m.group(0))
+                    except Exception:
+                        obj = None
+
+            arr = obj.get("tokens") if isinstance(obj, dict) else None
+            if isinstance(arr, str):
+                arr = [arr]
+            if not isinstance(arr, list):
+                return []
+
+            out: list[str] = []
+            seen: set[str] = set()
+            for s in arr:
+                if not isinstance(s, str):
+                    continue
+                s2 = s.strip()
+                s2 = re.sub(r"^(正面|正|负面|负)[:：]?", "", s2)
+                s2 = s2.strip(" ,，+\t\r\n")
+                if not s2:
+                    continue
+                k = s2.lower()
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append(s2)
+                if len(out) >= 6:
+                    break
+            return out
+
         for tok in unknown_tokens:
             tok2 = (tok or "").strip()
             if not tok2:
@@ -603,6 +726,28 @@ class MyPlugin(Star):
                     token=query_tok,
                     provider_id=provider_id,
                 )
+
+            if not resolved:
+                # Still not resolved: try AI-based splitting, then resolve each part.
+                parts = await ai_split_stat_token(query_tok)
+                for part in parts:
+                    part_resolved = self.riven_stat_mapper.resolve_from_alias(
+                        part, alias_map=RIVEN_STAT_ALIASES
+                    )
+                    if not part_resolved:
+                        part_resolved = await self.riven_stat_mapper.resolve_with_ai(
+                            context=self.context,
+                            event=event,
+                            token=part,
+                            provider_id=provider_id,
+                        )
+                    if not part_resolved:
+                        continue
+                    if is_negative:
+                        negative_stats.append(part_resolved)
+                    else:
+                        positive_stats.append(part_resolved)
+                continue
 
             if not resolved:
                 continue
@@ -657,6 +802,20 @@ class MyPlugin(Star):
 
         filtered.sort(
             key=lambda a: (
+                -(
+                    sum(
+                        1
+                        for s in positive_stats
+                        if any(x.positive and x.url_name == s for x in a.attributes)
+                    )
+                    + sum(
+                        1
+                        for s in negative_stats
+                        if any(
+                            (not x.positive) and x.url_name == s for x in a.attributes
+                        )
+                    )
+                ),
                 presence_rank(a.owner_status),
                 a.buyout_price,
                 (a.owner_name or ""),
@@ -1187,7 +1346,9 @@ class MyPlugin(Star):
             )
             return
 
-        state_cn = info.state or ("白天" if info.is_day else ("夜晚" if info.is_day is False else "未知"))
+        state_cn = info.state or (
+            "白天" if info.is_day else ("夜晚" if info.is_day is False else "未知")
+        )
         left = info.time_left or info.eta
         yield await self._render_worldstate_cycle(
             event,
@@ -1253,7 +1414,9 @@ class MyPlugin(Star):
             )
             return
 
-        state_cn = info.state or ("白天" if info.is_day else ("夜晚" if info.is_day is False else "未知"))
+        state_cn = info.state or (
+            "白天" if info.is_day else ("夜晚" if info.is_day is False else "未知")
+        )
         left = info.time_left or info.eta
         yield await self._render_worldstate_cycle(
             event,
@@ -1289,7 +1452,9 @@ class MyPlugin(Star):
             )
             return
 
-        state_cn = info.state or ("温暖" if info.is_warm else ("寒冷" if info.is_warm is False else "未知"))
+        state_cn = info.state or (
+            "温暖" if info.is_warm else ("寒冷" if info.is_warm is False else "未知")
+        )
         left = info.time_left or info.eta
         yield await self._render_worldstate_cycle(
             event,
@@ -1343,10 +1508,14 @@ class MyPlugin(Star):
         event.should_call_llm(False)
         query = str(args).strip()
         if not query:
-            yield event.plain_result("用法：/武器 <名称> 例如：/武器 绝路 或 /武器 soma")
+            yield event.plain_result(
+                "用法：/武器 <名称> 例如：/武器 绝路 或 /武器 soma"
+            )
             return
 
-        items = await self.public_export_client.search_weapon(query, language="zh", limit=5)
+        items = await self.public_export_client.search_weapon(
+            query, language="zh", limit=5
+        )
         if not items:
             yield event.plain_result(f"未找到武器：{query}")
             return
@@ -1365,7 +1534,9 @@ class MyPlugin(Star):
             cat_s = str(cat) if isinstance(cat, str) and cat else None
             right = " ".join([x for x in [mr_s, cat_s] if x]) or None
 
-            rows.append(WorldstateRow(title=name_s, subtitle=uniq_s or None, right=right))
+            rows.append(
+                WorldstateRow(title=name_s, subtitle=uniq_s or None, right=right)
+            )
             suffix = f" | {right}" if right else ""
             extra = f" | {uniq_s}" if uniq_s else ""
             lines.append(f"- {name_s}{suffix}{extra}")

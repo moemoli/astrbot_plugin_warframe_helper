@@ -471,7 +471,7 @@ async def render_wmr_auctions_image_to_file(
             }
         )
 
-    title = f"紫卡 {weapon.item_name}（{platform}） {summary} 前{limit}"
+    title = f"紫卡 {weapon.item_name}（{platform}） 前{limit}"
     img_bytes = _render_image(title=title, weapon_img=weapon_img, rows=rows)
 
     file_path = temp_dir / f"wmr_{uuid.uuid4().hex}.png"
