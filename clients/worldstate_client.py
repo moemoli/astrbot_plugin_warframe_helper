@@ -11,11 +11,15 @@ from astrbot.api import logger
 from ..http_utils import fetch_json
 from .public_export_client import PublicExportClient
 
-
 Platform = Literal["pc", "ps4", "xb1", "swi"]
 
 
-OFFICIAL_WORLDSTATE_URL = "https://api.warframe.com/cdn/worldState.php"
+OFFICIAL_WORLDSTATE_URLS: list[str] = [
+    # In some environments api.warframe.com may return 403.
+    # content.warframe.com is typically accessible and returns the same payload.
+    "https://content.warframe.com/dynamic/worldState.php",
+    "https://api.warframe.com/cdn/worldState.php",
+]
 
 
 def _now_utc() -> datetime:
@@ -324,7 +328,9 @@ class WarframeWorldstateClient:
         if cached is not None:
             return cached
 
-        data = await fetch_json(OFFICIAL_WORLDSTATE_URL, timeout_sec=self._http_timeout_sec)
+        data = await fetch_json(
+            OFFICIAL_WORLDSTATE_URLS, timeout_sec=self._http_timeout_sec
+        )
         if data is None:
             return None
 
@@ -339,7 +345,9 @@ class WarframeWorldstateClient:
         return translated or node
 
     async def _item_name(self, unique_name: str, *, language: str) -> str | None:
-        return await self._public_export.translate_unique_name(unique_name, language=language)
+        return await self._public_export.translate_unique_name(
+            unique_name, language=language
+        )
 
     def _mission_type_cn(self, code: str | None) -> str:
         code = (code or "").strip()
@@ -421,8 +429,16 @@ class WarframeWorldstateClient:
             mission_type = self._mission_type_cn(mission_code)
             faction = mi.get("faction") if isinstance(mi.get("faction"), str) else None
 
-            min_level = mi.get("minEnemyLevel") if isinstance(mi.get("minEnemyLevel"), int) else None
-            max_level = mi.get("maxEnemyLevel") if isinstance(mi.get("maxEnemyLevel"), int) else None
+            min_level = (
+                mi.get("minEnemyLevel")
+                if isinstance(mi.get("minEnemyLevel"), int)
+                else None
+            )
+            max_level = (
+                mi.get("maxEnemyLevel")
+                if isinstance(mi.get("maxEnemyLevel"), int)
+                else None
+            )
 
             reward_str: str | None = None
             mr = mi.get("missionReward")
@@ -431,13 +447,19 @@ class WarframeWorldstateClient:
                 credits = mr.get("credits")
                 if isinstance(credits, int) and credits > 0:
                     parts.append(f"{credits}现金")
-                parts.extend(await self._format_counted_items(mr.get("countedItems"), language=language))
+                parts.extend(
+                    await self._format_counted_items(
+                        mr.get("countedItems"), language=language
+                    )
+                )
                 items = mr.get("items")
                 if isinstance(items, list):
                     for it in items:
                         if not isinstance(it, str):
                             continue
-                        parts.append((await self._item_name(it, language=language)) or it)
+                        parts.append(
+                            (await self._item_name(it, language=language)) or it
+                        )
                 reward_str = " + ".join([p for p in parts if p]) or None
 
             expiry = _parse_ws_date(row.get("Expiry"))
@@ -544,11 +566,19 @@ class WarframeWorldstateClient:
                 node_u = v.get("node") if isinstance(v.get("node"), str) else ""
                 node = await self._node_name(node_u, language=language)
                 mt = self._mission_type_cn(
-                    v.get("missionType") if isinstance(v.get("missionType"), str) else ""
+                    v.get("missionType")
+                    if isinstance(v.get("missionType"), str)
+                    else ""
                 )
                 mod_raw = v.get("modifierType")
-                modifier = mod_raw.replace("SORTIE_MODIFIER_", "") if isinstance(mod_raw, str) else None
-                stages.append(SortieStage(node=node, mission_type=mt, modifier=modifier))
+                modifier = (
+                    mod_raw.replace("SORTIE_MODIFIER_", "")
+                    if isinstance(mod_raw, str)
+                    else None
+                )
+                stages.append(
+                    SortieStage(node=node, mission_type=mt, modifier=modifier)
+                )
 
         return SortieInfo(
             boss=boss,
@@ -650,10 +680,22 @@ class WarframeWorldstateClient:
                 item_type = it.get("ItemType")
                 if not isinstance(item_type, str) or not item_type:
                     continue
-                item_name = (await self._item_name(item_type, language=language)) or item_type
-                ducats = it.get("PrimePrice") if isinstance(it.get("PrimePrice"), int) else None
-                credits = it.get("RegularPrice") if isinstance(it.get("RegularPrice"), int) else None
-                inv.append(VoidTraderItem(item=item_name, ducats=ducats, credits=credits))
+                item_name = (
+                    await self._item_name(item_type, language=language)
+                ) or item_type
+                ducats = (
+                    it.get("PrimePrice")
+                    if isinstance(it.get("PrimePrice"), int)
+                    else None
+                )
+                credits = (
+                    it.get("RegularPrice")
+                    if isinstance(it.get("RegularPrice"), int)
+                    else None
+                )
+                inv.append(
+                    VoidTraderItem(item=item_name, ducats=ducats, credits=credits)
+                )
 
         return VoidTraderInfo(
             active=active,
@@ -665,7 +707,9 @@ class WarframeWorldstateClient:
     async def fetch_arbitration(
         self, *, platform: Platform = "pc", language: str = "zh"
     ) -> ArbitrationInfo | None:
-        logger.warning("Official worldState does not expose arbitration data currently; returning None")
+        logger.warning(
+            "Official worldState does not expose arbitration data currently; returning None"
+        )
         return None
 
     async def fetch_nightwave(
@@ -682,14 +726,18 @@ class WarframeWorldstateClient:
         phase = si.get("Phase") if isinstance(si.get("Phase"), int) else None
         expiry = _parse_ws_date(si.get("Expiry"))
 
-        mapping = await self._public_export.get_nightwave_challenge_map(language=language)
+        mapping = await self._public_export.get_nightwave_challenge_map(
+            language=language
+        )
         challenges: list[NightwaveChallenge] = []
         active_raw = si.get("ActiveChallenges")
         if isinstance(active_raw, list):
             for c in active_raw:
                 if not isinstance(c, dict):
                     continue
-                uniq = c.get("Challenge") if isinstance(c.get("Challenge"), str) else None
+                uniq = (
+                    c.get("Challenge") if isinstance(c.get("Challenge"), str) else None
+                )
                 if not uniq:
                     continue
                 title, standing = mapping.get(uniq, (uniq.split("/")[-1], None))
@@ -733,8 +781,14 @@ class WarframeWorldstateClient:
                 continue
             node = await self._node_name(node_u, language=language)
 
-            attacker = row.get("Faction") if isinstance(row.get("Faction"), str) else None
-            defender = row.get("DefenderFaction") if isinstance(row.get("DefenderFaction"), str) else None
+            attacker = (
+                row.get("Faction") if isinstance(row.get("Faction"), str) else None
+            )
+            defender = (
+                row.get("DefenderFaction")
+                if isinstance(row.get("DefenderFaction"), str)
+                else None
+            )
 
             goal = row.get("Goal") if isinstance(row.get("Goal"), int) else None
             count = row.get("Count") if isinstance(row.get("Count"), int) else None
@@ -742,8 +796,16 @@ class WarframeWorldstateClient:
             if goal and count is not None and goal > 0:
                 completion = (float(count) / float(goal)) * 100.0
 
-            ar = row.get("AttackerReward") if isinstance(row.get("AttackerReward"), dict) else None
-            dr = row.get("DefenderReward") if isinstance(row.get("DefenderReward"), dict) else None
+            ar = (
+                row.get("AttackerReward")
+                if isinstance(row.get("AttackerReward"), dict)
+                else None
+            )
+            dr = (
+                row.get("DefenderReward")
+                if isinstance(row.get("DefenderReward"), dict)
+                else None
+            )
             ar_ci = (ar or {}).get("countedItems") or (ar or {}).get("CountedItems")
             dr_ci = (dr or {}).get("countedItems") or (dr or {}).get("CountedItems")
             ar_parts = await self._format_counted_items(ar_ci, language=language)

@@ -74,8 +74,8 @@ Invoke-RestMethod 'https://api.warframestat.us/pc/fissures?language=zh' |
 
 ### 2.1 官方 WorldState（PC）
 
-- URL（已验证可访问）：`https://api.warframe.com/cdn/worldState.php`
-- 旧地址（会重定向）：`https://content.warframe.com/dynamic/worldState.php`
+- 首选 URL（通常更可用）：`https://content.warframe.com/dynamic/worldState.php`
+- 备用 URL（部分环境可能返回 403）：`https://api.warframe.com/cdn/worldState.php`
 
 #### 注意事项
 
@@ -87,7 +87,7 @@ Invoke-RestMethod 'https://api.warframestat.us/pc/fissures?language=zh' |
 
 ```powershell
 # 拉取并解析 JSON（注意：返回很大）
-Invoke-RestMethod 'https://api.warframe.com/cdn/worldState.php'
+Invoke-RestMethod 'https://content.warframe.com/dynamic/worldState.php'
 ```
 
 ---

@@ -11,7 +11,12 @@ from astrbot.api import logger
 def _default_headers() -> dict[str, str]:
     return {
         "User-Agent": "AstrBot/warframe_helper (+https://github.com/Soulter/AstrBot)",
-        "Accept": "*/*",
+        # Some upstream endpoints may enforce anti-bot rules.
+        # Keep headers lightweight but browser-compatible.
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+        "Referer": "https://www.warframe.com/",
+        "Origin": "https://www.warframe.com",
     }
 
 

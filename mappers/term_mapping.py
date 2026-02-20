@@ -419,11 +419,43 @@ class WarframeTermMapper:
         return None
 
     def _build_slug_candidates(self, query: str) -> list[str]:
-        slug = self._alias_to_slug(query)
-        if slug:
-            return [slug]
+        # User aliases are explicit and should not be overridden by heuristics.
+        key = self._normalize_key(query)
+        if key in self._user_aliases:
+            slug = self._user_aliases[key]
+            return [slug] if slug else []
 
         base, prime_flag, set_flag = self._parse_prime_and_set(query)
+        base_key = self._normalize_key(base)
+
+        candidates: list[str] = []
+
+        # Built-in warframe nicknames (e.g. 毒妈) are usually used to refer to the
+        # Prime Set in warframe.market. If user didn't specify p/prime/set,
+        # prefer trying "*_prime_set" first, but keep the original slug as fallback.
+        if (
+            base_key in self._BUILTIN_BASE_NICKNAMES
+            and (not prime_flag)
+            and (not set_flag)
+        ):
+            slug_base = self._BUILTIN_BASE_NICKNAMES[base_key]
+            candidates.append(f"{slug_base}_prime_set")
+
+        slug = self._alias_to_slug(query)
+        if slug:
+            candidates.append(slug)
+
+        # If we already have candidates (from alias/builtin heuristic), keep them.
+        if candidates:
+            # Dedup but keep order
+            dedup: list[str] = []
+            seen: set[str] = set()
+            for c in candidates:
+                if c and c not in seen:
+                    dedup.append(c)
+                    seen.add(c)
+            return dedup
+
         base_key = self._normalize_key(base)
         if not re.fullmatch(r"[a-z0-9 _\-']+", base_key):
             return []
@@ -438,7 +470,7 @@ class WarframeTermMapper:
         if not slug_base:
             return []
 
-        candidates: list[str] = []
+        candidates = []
         if prime_flag:
             candidates.append(f"{slug_base}_prime_set")
             candidates.append(f"{slug_base}_prime")
@@ -610,8 +642,20 @@ class WarframeTermMapper:
                 provider_id = await context.get_current_chat_provider_id(
                     event.unified_msg_origin,
                 )
-            except Exception:
+            except Exception as e:
+                logger.warning(
+                    "AI fallback skipped: failed to get current chat provider_id for warframe.market slug suggestion. query=%r err=%r",
+                    query,
+                    e,
+                )
                 return []
+
+        if not provider_id:
+            logger.warning(
+                "AI fallback skipped: provider_id is empty for warframe.market slug suggestion. query=%r",
+                query,
+            )
+            return []
 
         system_prompt = (
             "You convert Warframe abbreviations/nicknames into warframe.market v2 item slugs. "
@@ -648,9 +692,21 @@ class WarframeTermMapper:
                     system_prompt=system_prompt,
                     temperature=0,
                 )
-            except Exception:
+            except Exception as e:
+                logger.warning(
+                    "AI fallback failed: llm_generate error (no-timeout retry) for warframe.market slug suggestion. provider_id=%r query=%r err=%r",
+                    provider_id,
+                    query,
+                    e,
+                )
                 return []
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "AI fallback failed: llm_generate error for warframe.market slug suggestion. provider_id=%r query=%r err=%r",
+                provider_id,
+                query,
+                e,
+            )
             return []
         logger.info(
             f"LLM response for warframe.market slug suggestion: {llm_resp.completion_text or 'empty'}"

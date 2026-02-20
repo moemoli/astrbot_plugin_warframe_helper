@@ -29,6 +29,13 @@ class RivenWeapon:
 class WarframeRivenWeaponMapper:
     """将用户输入（可能是中文武器名/简称）解析为 warframe.market 的 weapon_url_name。"""
 
+    # Common CN weapon names/nicknames -> warframe.market riven weapon_url_name.
+    # Keep this minimal and high-confidence.
+    _BUILTIN_WEAPON_ALIASES: dict[str, str] = {
+        # PublicExport zh name: 绝路 (English: RUBICO)
+        "绝路": "rubico",
+    }
+
     def __init__(
         self,
         *,
@@ -69,6 +76,20 @@ class WarframeRivenWeaponMapper:
         text = text.strip().lower()
         text = re.sub(r"\s+", "", text)
         return text
+
+    def _strip_prime_suffix(self, key: str) -> str:
+        """Strip common prime indicators from a normalized key.
+
+        Rivens are usually indexed by the weapon family url_name, so
+        'xxx prime' / 'xxx p' should resolve to the same url_name.
+        """
+
+        k = (key or "").strip().lower()
+        if k.endswith("prime") and len(k) > 5:
+            return k[: -len("prime")]
+        if k.endswith("p") and len(k) > 1:
+            return k[:-1]
+        return k
 
     def _load_cache(
         self,
@@ -250,8 +271,20 @@ class WarframeRivenWeaponMapper:
                 provider_id = await context.get_current_chat_provider_id(
                     event.unified_msg_origin
                 )
-            except Exception:
+            except Exception as e:
+                logger.warning(
+                    "AI fallback skipped: failed to get current chat provider_id for riven weapon suggestion. query=%r err=%r",
+                    query,
+                    e,
+                )
                 return []
+
+        if not provider_id:
+            logger.warning(
+                "AI fallback skipped: provider_id is empty for riven weapon suggestion. query=%r",
+                query,
+            )
+            return []
 
         system_prompt = "You convert Warframe weapon names/nicknames into warframe.market riven weapon_url_name. Return JSON only."
         prompt = (
@@ -283,9 +316,21 @@ class WarframeRivenWeaponMapper:
                     system_prompt=system_prompt,
                     temperature=0,
                 )
-            except Exception:
+            except Exception as e:
+                logger.warning(
+                    "AI fallback failed: llm_generate error (no-timeout retry) for riven weapon suggestion. provider_id=%r query=%r err=%r",
+                    provider_id,
+                    query,
+                    e,
+                )
                 return []
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "AI fallback failed: llm_generate error for riven weapon suggestion. provider_id=%r query=%r err=%r",
+                provider_id,
+                query,
+                e,
+            )
             return []
 
         text = (llm_resp.completion_text or "").strip()
@@ -309,10 +354,22 @@ class WarframeRivenWeaponMapper:
             return None
 
         key = self._normalize_key(q)
+
+        # Direct matches (url_name / item_name)
         if key in self._weapons_by_url:
             return self._weapons_by_url[key]
         if key in self._weapons_by_name:
             return self._weapons_by_name[key]
+
+        # Built-in CN aliases
+        k2 = self._strip_prime_suffix(key)
+        for cand_key in [key, k2]:
+            mapped = self._BUILTIN_WEAPON_ALIASES.get(cand_key)
+            if not mapped:
+                continue
+            mk = self._normalize_key(mapped)
+            if mk in self._weapons_by_url:
+                return self._weapons_by_url[mk]
 
         # LLM 兜底：生成候选 weapon_url_name，再用 items 列表校验
         candidates = await self._suggest_weapon_url_names_via_ai(
