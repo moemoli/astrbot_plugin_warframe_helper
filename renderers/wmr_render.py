@@ -669,6 +669,7 @@ def _draw_attr_parts_line(
     first = True
     ell = "…"
     ell_w = _text_w(draw, ell, font=font)
+    space_w = _text_w(draw, " ", font=font)
 
     for label, value in attrs:
         sep = "" if first else "，"
@@ -678,12 +679,15 @@ def _draw_attr_parts_line(
         label_w = _text_w(draw, label_text, font=font)
         value_w = _text_w(draw, value_text, font=font)
 
-        if label_w + value_w <= remaining:
+        total_w = label_w + space_w + value_w
+
+        if total_w <= remaining:
             draw.text((cur_x, y), label_text, fill=label_color, font=font)
             cur_x += label_w
+            cur_x += space_w
             draw.text((cur_x, y), value_text, fill=value_color, font=font)
             cur_x += value_w
-            remaining -= label_w + value_w
+            remaining -= total_w
             first = False
             continue
 
@@ -701,6 +705,14 @@ def _draw_attr_parts_line(
         draw.text((cur_x, y), label_text, fill=label_color, font=font)
         cur_x += label_w
         remaining -= label_w
+
+        # Insert a single space between label and value.
+        if remaining <= space_w:
+            draw.text((cur_x, y), ell, fill=label_color, font=font)
+            return
+        cur_x += space_w
+        remaining -= space_w
+
         t = _truncate_text(draw, value_text, font=font, max_w=remaining)
         draw.text((cur_x, y), t, fill=value_color, font=font)
         return
