@@ -1,5 +1,6 @@
 import re
 import time
+from typing import cast
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -8,7 +9,8 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.star.filter.command import GreedyStr
 
 from .clients.market_client import WarframeMarketClient
-from .clients.worldstate_client import WarframeWorldstateClient
+from .clients.public_export_client import PublicExportClient
+from .clients.worldstate_client import Platform, WarframeWorldstateClient
 from .constants import (
     MARKET_PLATFORM_ALIASES,
     RIVEN_POLARITY_CN,
@@ -46,6 +48,7 @@ class MyPlugin(Star):
         self.riven_stat_mapper = WarframeRivenStatMapper()
         self.market_client = WarframeMarketClient()
         self.worldstate_client = WarframeWorldstateClient()
+        self.public_export_client = PublicExportClient()
 
         # 最近一次 /wm 的 TopN 结果缓存（用于“回复图片发数字”快速生成 /w 话术）
         # key = unified_origin + sender_id
@@ -87,8 +90,11 @@ class MyPlugin(Star):
             return None
         return rec
 
-    def _worldstate_platform_from_tokens(self, tokens: list[str]) -> str:
-        return parse_platform(tokens, WORLDSTATE_PLATFORM_ALIASES, default="pc")
+    def _worldstate_platform_from_tokens(self, tokens: list[str]) -> Platform:
+        p = parse_platform(tokens, WORLDSTATE_PLATFORM_ALIASES, default="pc")
+        if p in {"pc", "ps4", "xb1", "swi"}:
+            return cast(Platform, p)
+        return "pc"
 
     def _market_platform_from_tokens(self, tokens: list[str]) -> str:
         return parse_platform(tokens, MARKET_PLATFORM_ALIASES, default="pc")
@@ -117,8 +123,45 @@ class MyPlugin(Star):
             return event.image_result(rendered.path)
         return event.plain_result(plain_text)
 
+    async def _render_worldstate_cycle(
+        self,
+        event: AstrMessageEvent,
+        *,
+        title: str,
+        platform_norm: str,
+        state_cn: str,
+        left: str,
+        start_time: str | None,
+        end_time: str | None,
+        accent: tuple[int, int, int, int],
+        plain_prefix: str,
+    ):
+        rows: list[WorldstateRow] = [
+            WorldstateRow(title=f"当前：{state_cn}", right=f"剩余{left}"),
+        ]
+        if start_time:
+            rows.append(WorldstateRow(title=f"开始：{start_time}"))
+        if end_time:
+            rows.append(WorldstateRow(title=f"结束：{end_time}"))
+
+        rendered = await render_worldstate_rows_image_to_file(
+            title=title,
+            header_lines=[f"平台：{platform_norm}"],
+            rows=rows,
+            accent=accent,
+        )
+        if rendered:
+            return event.image_result(rendered.path)
+
+        lines = [f"{plain_prefix}（{platform_norm}）当前：{state_cn} | 剩余{left}"]
+        if start_time:
+            lines.append(f"开始：{start_time}")
+        if end_time:
+            lines.append(f"结束：{end_time}")
+        return event.plain_result("\n".join(lines))
+
     async def _render_fissures_text(
-        self, *, platform_norm: str, fissure_kind: str
+        self, *, platform_norm: Platform, fissure_kind: str
     ) -> str:
         fissures = await self.worldstate_client.fetch_fissures(
             platform=platform_norm, language="zh"
@@ -149,7 +192,9 @@ class MyPlugin(Star):
             lines.append(f"- {f.tier} {f.mission_type} - {f.node} | 剩余{f.eta}{enemy}")
         return "\n".join(lines)
 
-    async def _render_fissures_image(self, *, platform_norm: str, fissure_kind: str):
+    async def _render_fissures_image(
+        self, *, platform_norm: Platform, fissure_kind: str
+    ):
         fissures = await self.worldstate_client.fetch_fissures(
             platform=platform_norm, language="zh"
         )
@@ -1142,22 +1187,18 @@ class MyPlugin(Star):
             )
             return
 
-        if info.is_day is True:
-            state_cn = "白天"
-        elif info.is_day is False:
-            state_cn = "夜晚"
-        else:
-            state_cn = info.state or "未知"
-
+        state_cn = info.state or ("白天" if info.is_day else ("夜晚" if info.is_day is False else "未知"))
         left = info.time_left or info.eta
-        yield await self._render_worldstate_single_row(
+        yield await self._render_worldstate_cycle(
             event,
             title="夜灵平原",
             platform_norm=platform_norm,
-            row_title=f"当前：{state_cn}",
-            row_right=f"剩余{left}",
+            state_cn=state_cn,
+            left=left,
+            start_time=getattr(info, "start_time", None),
+            end_time=getattr(info, "end_time", None),
             accent=(20, 184, 166, 255),
-            plain_text=f"夜灵平原（{platform_norm}）当前：{state_cn} | 剩余{left}",
+            plain_prefix="夜灵平原",
         )
 
     @filter.command("魔胎之境", alias={"魔胎", "cambion"})
@@ -1179,23 +1220,18 @@ class MyPlugin(Star):
             )
             return
 
-        active = (info.active or "").strip().lower()
-        if active == "fass":
-            state_cn = "法斯"
-        elif active == "vome":
-            state_cn = "沃姆"
-        else:
-            state_cn = info.active or info.state or "未知"
-
+        state_cn = info.active or info.state or "未知"
         left = info.time_left or info.eta
-        yield await self._render_worldstate_single_row(
+        yield await self._render_worldstate_cycle(
             event,
             title="魔胎之境",
             platform_norm=platform_norm,
-            row_title=f"当前：{state_cn}",
-            row_right=f"剩余{left}",
+            state_cn=state_cn,
+            left=left,
+            start_time=getattr(info, "start_time", None),
+            end_time=getattr(info, "end_time", None),
             accent=(20, 184, 166, 255),
-            plain_text=f"魔胎之境（{platform_norm}）当前：{state_cn} | 剩余{left}",
+            plain_prefix="魔胎之境",
         )
 
     @filter.command("地球昼夜", alias={"地球循环", "地球", "earth"})
@@ -1217,22 +1253,18 @@ class MyPlugin(Star):
             )
             return
 
-        if info.is_day is True:
-            state_cn = "白天"
-        elif info.is_day is False:
-            state_cn = "夜晚"
-        else:
-            state_cn = info.state or "未知"
-
+        state_cn = info.state or ("白天" if info.is_day else ("夜晚" if info.is_day is False else "未知"))
         left = info.time_left or info.eta
-        yield await self._render_worldstate_single_row(
+        yield await self._render_worldstate_cycle(
             event,
             title="地球昼夜",
             platform_norm=platform_norm,
-            row_title=f"当前：{state_cn}",
-            row_right=f"剩余{left}",
+            state_cn=state_cn,
+            left=left,
+            start_time=getattr(info, "start_time", None),
+            end_time=getattr(info, "end_time", None),
             accent=(20, 184, 166, 255),
-            plain_text=f"地球（{platform_norm}）当前：{state_cn} | 剩余{left}",
+            plain_prefix="地球",
         )
 
     @filter.command(
@@ -1257,28 +1289,18 @@ class MyPlugin(Star):
             )
             return
 
-        if info.is_warm is True:
-            state_cn = "温暖"
-        elif info.is_warm is False:
-            state_cn = "寒冷"
-        else:
-            raw = (info.state or "").strip().lower()
-            if raw == "warm":
-                state_cn = "温暖"
-            elif raw == "cold":
-                state_cn = "寒冷"
-            else:
-                state_cn = info.state or "未知"
-
+        state_cn = info.state or ("温暖" if info.is_warm else ("寒冷" if info.is_warm is False else "未知"))
         left = info.time_left or info.eta
-        yield await self._render_worldstate_single_row(
+        yield await self._render_worldstate_cycle(
             event,
             title="奥布山谷",
             platform_norm=platform_norm,
-            row_title=f"当前：{state_cn}",
-            row_right=f"剩余{left}",
+            state_cn=state_cn,
+            left=left,
+            start_time=getattr(info, "start_time", None),
+            end_time=getattr(info, "end_time", None),
             accent=(20, 184, 166, 255),
-            plain_text=f"奥布山谷（{platform_norm}）当前：{state_cn} | 剩余{left}",
+            plain_prefix="奥布山谷",
         )
 
     @filter.command("双衍王境", alias={"双衍", "双衍循环", "duviri"})
@@ -1302,15 +1324,63 @@ class MyPlugin(Star):
 
         state = (info.state or "未知").strip()
         left = info.time_left or info.eta
-        yield await self._render_worldstate_single_row(
+        yield await self._render_worldstate_cycle(
             event,
             title="双衍王境",
             platform_norm=platform_norm,
-            row_title=f"当前：{state}",
-            row_right=f"剩余{left}",
+            state_cn=state,
+            left=left,
+            start_time=getattr(info, "start_time", None),
+            end_time=getattr(info, "end_time", None),
             accent=(20, 184, 166, 255),
-            plain_text=f"双衍王境（{platform_norm}）当前：{state} | 剩余{left}",
+            plain_prefix="双衍王境",
         )
+
+    @filter.command("武器", alias={"weapon", "wfweapon"})
+    async def wf_weapon(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
+        """根据 PublicExport 查询武器（中文优先，也支持英文/uniqueName 匹配）。用法：/武器 绝路"""
+
+        event.should_call_llm(False)
+        query = str(args).strip()
+        if not query:
+            yield event.plain_result("用法：/武器 <名称> 例如：/武器 绝路 或 /武器 soma")
+            return
+
+        items = await self.public_export_client.search_weapon(query, language="zh", limit=5)
+        if not items:
+            yield event.plain_result(f"未找到武器：{query}")
+            return
+
+        rows: list[WorldstateRow] = []
+        lines: list[str] = [f"武器搜索：{query}（展示前{len(items)}条）"]
+        for w in items:
+            name = w.get("name") if isinstance(w, dict) else None
+            uniq = w.get("uniqueName") if isinstance(w, dict) else None
+            mr = w.get("masteryReq") if isinstance(w, dict) else None
+            cat = w.get("category") if isinstance(w, dict) else None
+
+            name_s = str(name) if isinstance(name, str) and name else "?"
+            uniq_s = str(uniq) if isinstance(uniq, str) and uniq else ""
+            mr_s = f"MR{mr}" if isinstance(mr, int) else None
+            cat_s = str(cat) if isinstance(cat, str) and cat else None
+            right = " ".join([x for x in [mr_s, cat_s] if x]) or None
+
+            rows.append(WorldstateRow(title=name_s, subtitle=uniq_s or None, right=right))
+            suffix = f" | {right}" if right else ""
+            extra = f" | {uniq_s}" if uniq_s else ""
+            lines.append(f"- {name_s}{suffix}{extra}")
+
+        rendered = await render_worldstate_rows_image_to_file(
+            title="武器",
+            header_lines=["数据源：PublicExport", f"查询：{query}"],
+            rows=rows,
+            accent=(245, 158, 11, 255),
+        )
+        if rendered:
+            yield event.image_result(rendered.path)
+            return
+
+        yield event.plain_result("\n".join(lines))
 
     @filter.command("入侵", alias={"invasions"})
     async def wf_invasions(
