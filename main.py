@@ -40,7 +40,7 @@ from .renderers.worldstate_render import (
 
 
 @register("warframe_helper", "moemoli", "Warframe 助手", "v0.0.1")
-class MyPlugin(Star):
+class WarframeHelperPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context, config)
         self.config = config
@@ -491,12 +491,15 @@ class MyPlugin(Star):
 
         platform_norm = "pc"
         limit = 10
+        language = "zh"
 
         positive_stats: list[str] = []
         negative_stats: list[str] = []
         negative_required = False
         mastery_rank_min: int | None = None
         polarity: str | None = None
+
+        pending_stats: list[tuple[str, bool]] = []
 
         unknown_tokens: list[str] = []
 
@@ -515,6 +518,11 @@ class MyPlugin(Star):
             # limit
             if t_norm.isdigit():
                 limit = int(t_norm)
+                continue
+
+            # language (keep consistent with /wm)
+            if re.fullmatch(r"[a-z]{2}([\-_][a-z]{2,8})?", t_norm):
+                language = t_norm.replace("_", "-")
                 continue
 
             # mastery: 12段 / MR12
@@ -592,12 +600,20 @@ class MyPlugin(Star):
                 negative_required = True
                 key = t_norm[1:]
                 if key in RIVEN_STAT_ALIASES:
-                    negative_stats.append(RIVEN_STAT_ALIASES[key])
+                    url_name = RIVEN_STAT_ALIASES[key]
+                    if url_name == "damage_vs_sentient":
+                        pending_stats.append((url_name, True))
+                    else:
+                        negative_stats.append(url_name)
                 continue
 
             # explicit positive stat tokens
             if t_norm in RIVEN_STAT_ALIASES:
-                positive_stats.append(RIVEN_STAT_ALIASES[t_norm])
+                url_name = RIVEN_STAT_ALIASES[t_norm]
+                if url_name == "damage_vs_sentient":
+                    pending_stats.append((url_name, False))
+                else:
+                    positive_stats.append(url_name)
                 continue
 
             # 兼容“正面词条暴击率/暴击伤害”等组合写法
@@ -617,6 +633,20 @@ class MyPlugin(Star):
         )
 
         await self.riven_stat_mapper.initialize()
+
+        for url_name, is_negative in pending_stats:
+            if self.riven_stat_mapper.is_valid_url_name(url_name):
+                if is_negative:
+                    negative_stats.append(url_name)
+                else:
+                    positive_stats.append(url_name)
+                continue
+
+            yield event.plain_result(
+                "warframe.market 当前不支持“对Sentient伤害（S歧视）”紫卡词条。"
+                "目前仅支持：对Grineer/Corpus/Infested伤害（G/C/I歧视）。"
+            )
+            return
 
         async def ai_split_stat_token(token: str) -> list[str]:
             """Use LLM to split a composite shorthand token into smaller stat tokens.
@@ -800,24 +830,49 @@ class MyPlugin(Star):
                 a for a in filtered if any((not x.positive) for x in a.attributes)
             ]
 
+        req_pos = set(positive_stats)
+        req_neg = set(negative_stats)
+
+        def stat_fit_score(a) -> int:
+            a_pos = {x.url_name for x in a.attributes if x.positive}
+            a_neg = {x.url_name for x in a.attributes if not x.positive}
+
+            score = 0
+
+            # Reward hits, strongly penalize missing requested stats.
+            score += 10 * len(req_pos & a_pos)
+            score += 10 * len(req_neg & a_neg)
+            score -= 50 * len(req_pos - a_pos)
+            score -= 50 * len(req_neg - a_neg)
+
+            # Prefer having a negative when user requires it.
+            if negative_required and not a_neg:
+                score -= 20
+
+            # If user specified some stats, prefer fewer unrelated extras.
+            if req_pos:
+                score -= len(a_pos - req_pos)
+            if req_neg:
+                score -= len(a_neg - req_neg)
+
+            # Polarity match preference.
+            if polarity:
+                if (a.polarity or "").strip().lower() == polarity.strip().lower():
+                    score += 5
+                else:
+                    score -= 5
+
+            # If MR threshold specified, prefer closer to the threshold.
+            if mastery_rank_min is not None and a.mastery_level is not None:
+                score -= abs(int(a.mastery_level) - int(mastery_rank_min))
+
+            return score
+
         filtered.sort(
             key=lambda a: (
-                -(
-                    sum(
-                        1
-                        for s in positive_stats
-                        if any(x.positive and x.url_name == s for x in a.attributes)
-                    )
-                    + sum(
-                        1
-                        for s in negative_stats
-                        if any(
-                            (not x.positive) and x.url_name == s for x in a.attributes
-                        )
-                    )
-                ),
-                presence_rank(a.owner_status),
+                -stat_fit_score(a),
                 a.buyout_price,
+                presence_rank(a.owner_status),
                 (a.owner_name or ""),
             )
         )
@@ -847,6 +902,7 @@ class MyPlugin(Star):
 
         rendered = await render_wmr_auctions_image_to_file(
             weapon=weapon,
+            weapon_display_name=("" if language.startswith("en") else weapon_query),
             auctions=top,
             platform=platform_norm,
             summary=summary,
@@ -857,7 +913,8 @@ class MyPlugin(Star):
             return
 
         # fallback text
-        lines = [f"紫卡 {weapon.item_name}（{platform_norm}）{summary} 前{len(top)}："]
+        fallback_name = weapon.item_name if language.startswith("en") else weapon_query
+        lines = [f"紫卡 {fallback_name}（{platform_norm}）{summary} 前{len(top)}："]
         for idx, a in enumerate(top, start=1):
             name = a.owner_name or "unknown"
             status = a.owner_status or "unknown"
@@ -1623,12 +1680,38 @@ class MyPlugin(Star):
     async def wf_syndicates(
         self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()
     ):
-        """查询集团任务（Syndicate Missions）。"""
+        """查询集团任务（Syndicate Missions）。
+
+        用法：
+        - /集团
+        - /集团 pc
+        - /集团 新世间
+        - /集团 新世间 pc
+        """
 
         event.should_call_llm(False)
 
         tokens = split_tokens(str(args))
         platform_norm = self._worldstate_platform_from_tokens(tokens)
+
+        # Optional: syndicate name query (remove platform tokens first).
+        def is_platform_token(tok: str) -> bool:
+            t = (tok or "").strip().lower()
+            return (
+                t in WORLDSTATE_PLATFORM_ALIASES
+                or t in WORLDSTATE_PLATFORM_ALIASES.values()
+            )
+
+        name_tokens: list[str] = []
+        for t in tokens:
+            s = str(t).strip()
+            if not s:
+                continue
+            if is_platform_token(s):
+                continue
+            name_tokens.append(s)
+
+        syndicate_query = " ".join(name_tokens).strip()
 
         syndicates = await self.worldstate_client.fetch_syndicates(
             platform=platform_norm, language="zh"
@@ -1640,6 +1723,69 @@ class MyPlugin(Star):
             return
         if not syndicates:
             yield event.plain_result(f"当前无集团任务（{platform_norm}）。")
+            return
+
+        def norm(s: str) -> str:
+            return re.sub(r"\s+", "", (s or "").strip().lower())
+
+        # If user specified a syndicate name, list that syndicate's jobs.
+        if syndicate_query:
+            qn = norm(syndicate_query)
+            matched = [s for s in syndicates if qn and qn in norm(s.name)]
+
+            if not matched:
+                names = "、".join([s.name for s in syndicates])
+                yield event.plain_result(
+                    f"未找到集团：{syndicate_query}（{platform_norm}）。可用集团：{names}"
+                )
+                return
+
+            if len(matched) > 1:
+                names = "、".join([s.name for s in matched])
+                yield event.plain_result(
+                    f"匹配到多个集团：{names}。请更精确一些（例如输入完整名称）。"
+                )
+                return
+
+            s = matched[0]
+            jobs = list(s.jobs or ())
+            if not jobs:
+                yield event.plain_result(f"{s.name}（{platform_norm}）当前无任务。")
+                return
+
+            rows: list[WorldstateRow] = []
+            for j in jobs[:18]:
+                node = j.node or "?"
+                mtype = j.mission_type or "?"
+                rows.append(
+                    WorldstateRow(
+                        title=f"{mtype} - {node}",
+                        right=f"剩余{j.eta}" if j.eta else None,
+                    )
+                )
+
+            rendered = await render_worldstate_rows_image_to_file(
+                title=f"集团 {s.name}",
+                header_lines=[
+                    f"平台：{platform_norm}",
+                    f"剩余：{s.eta}",
+                    f"共{len(jobs)}条（展示前{min(18, len(jobs))}条）",
+                ],
+                rows=rows,
+                accent=(16, 185, 129, 255),
+            )
+            if rendered:
+                yield event.image_result(rendered.path)
+                return
+
+            lines: list[str] = [
+                f"集团 {s.name}（{platform_norm}）剩余{s.eta}：共{len(jobs)}条",
+            ]
+            for j in jobs:
+                node = j.node or "?"
+                mtype = j.mission_type or "?"
+                lines.append(f"- {mtype} - {node} | 剩余{j.eta}")
+            yield event.plain_result("\n".join(lines))
             return
 
         rows: list[WorldstateRow] = []

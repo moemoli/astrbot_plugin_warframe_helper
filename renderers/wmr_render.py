@@ -19,6 +19,29 @@ from ..mappers.riven_mapping import RivenWeapon
 
 WARFRAME_MARKET_ASSETS_BASE_URL = "https://warframe.market/static/assets/"
 
+_WFM_POLARITY_ICONS: dict[str, dict[str, str]] = {
+    "madurai": {"symbol": "icon-madurai", "viewBox": "0 0 16.267 16.491"},
+    "vazarin": {"symbol": "icon-vazarin", "viewBox": "0 0 13.546 16.345"},
+    "naramon": {"symbol": "icon-naramon", "viewBox": "0 0 18 18"},
+}
+
+_polarity_icon_cache: dict[tuple[str, int], Image.Image] = {}
+_polarity_svg_cache: dict[str, str] = {}
+
+_POLARITY_ICON_COLOR = (71, 85, 105, 255)
+
+
+def _plugin_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _polarity_assets_dir() -> Path:
+    return _plugin_root() / "assets" / "polarity"
+
+
+def _polarity_svg_path(polarity: str) -> Path:
+    return _polarity_assets_dir() / f"{polarity.strip().lower()}.svg"
+
 
 @dataclass(frozen=True, slots=True)
 class RenderedImage:
@@ -27,6 +50,71 @@ class RenderedImage:
 
 def _asset_url(asset_path: str) -> str:
     return WARFRAME_MARKET_ASSETS_BASE_URL + asset_path.lstrip("/")
+
+
+async def _get_polarity_icon(
+    polarity: str | None,
+    *,
+    size: int,
+) -> Image.Image | None:
+    """Get polarity icon image from locally vendored SVGs.
+
+    This function is intentionally offline-only: it never downloads assets at runtime.
+    If the SVG files are missing or cairosvg isn't available, it returns None and the
+    caller should fall back to text.
+    """
+
+    p = (polarity or "").strip().lower()
+    if not p:
+        return None
+
+    meta = _WFM_POLARITY_ICONS.get(p)
+    if not meta:
+        return None
+
+    s = max(8, int(size))
+    cache_key = (p, s)
+    cached = _polarity_icon_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    svg_text = _polarity_svg_cache.get(p)
+    if not svg_text:
+        svg_path = _polarity_svg_path(p)
+        if not svg_path.exists() or svg_path.stat().st_size <= 0:
+            return None
+        try:
+            svg_text = svg_path.read_text(encoding="utf-8")
+            _polarity_svg_cache[p] = svg_text
+        except Exception:
+            return None
+
+    # Rasterize with cairosvg if available.
+    try:
+        from cairosvg import svg2png  # type: ignore
+    except Exception:
+        return None
+
+    try:
+        png_bytes = svg2png(
+            bytestring=svg_text.encode("utf-8"),
+            output_width=s,
+            output_height=s,
+        )
+        raw = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+    except Exception:
+        return None
+
+    # Normalize icon color to meta gray.
+    try:
+        _, _, _, a = raw.split()
+        icon = Image.new("RGBA", (raw.width, raw.height), _POLARITY_ICON_COLOR)
+        icon.putalpha(a)
+    except Exception:
+        icon = raw
+
+    _polarity_icon_cache[cache_key] = icon
+    return icon
 
 
 async def _download_bytes(url: str, *, timeout_sec: float = 10.0) -> bytes | None:
@@ -87,12 +175,26 @@ def _load_font(
 
 
 def _open_image_rgba(
-    image_bytes: bytes, *, size: tuple[int, int]
+    image_bytes: bytes,
+    *,
+    size: tuple[int, int],
+    contain: bool = False,
 ) -> Image.Image | None:
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
-        img = img.resize(size, Image.Resampling.LANCZOS)
-        return img
+        if not contain:
+            return img.resize(size, Image.Resampling.LANCZOS)
+
+        tw, th = size
+        if tw <= 0 or th <= 0:
+            return img
+
+        img.thumbnail((tw, th), Image.Resampling.LANCZOS)
+        out = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        x = (tw - img.width) // 2
+        y = (th - img.height) // 2
+        out.alpha_composite(img, (x, y))
+        return out
     except Exception:
         return None
 
@@ -169,6 +271,45 @@ def _linear_gradient(
     return img
 
 
+def _resize_cover(img: Image.Image, *, size: tuple[int, int]) -> Image.Image:
+    """Resize image to cover target size while preserving aspect ratio, then center-crop."""
+
+    tw, th = size
+    if tw <= 0 or th <= 0:
+        return img
+
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+
+    sw, sh = img.size
+    if sw <= 0 or sh <= 0:
+        return img
+
+    scale = max(tw / sw, th / sh)
+    nw = max(1, int(round(sw * scale)))
+    nh = max(1, int(round(sh * scale)))
+    resized = img.resize((nw, nh), Image.Resampling.LANCZOS)
+
+    left = max(0, (nw - tw) // 2)
+    top = max(0, (nh - th) // 2)
+    return resized.crop((left, top, left + tw, top + th))
+
+
+def _apply_alpha(img: Image.Image, *, factor: float) -> Image.Image:
+    """Multiply the alpha channel by `factor` (0~1)."""
+
+    f = max(0.0, min(float(factor), 1.0))
+    if f >= 1.0:
+        return img
+
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+
+    r, g, b, a = img.split()
+    a2 = a.point(lambda p: int(p * f))
+    return Image.merge("RGBA", (r, g, b, a2))
+
+
 _STAT_CN: dict[str, str] = {
     **RIVEN_STAT_CN,
     # More common riven stats not covered by shared constants
@@ -222,20 +363,98 @@ def _truncate_text(
 
 
 def _fmt_attr(a: RivenAttribute) -> str:
+    """Legacy formatter kept for compatibility."""
+
+    label, val = _fmt_attr_parts(a)
+    return f"{label}{val}"
+
+
+def _fmt_attr_parts(a: RivenAttribute) -> tuple[str, str]:
     label = _STAT_CN.get(a.url_name, a.url_name)
-    sign = "+" if a.positive else "-"
 
     # 部分字段 value 是倍率（0.74），部分是百分比（146.2）。这里用启发式：
-    # - |v| < 10 => 认为是倍率，显示为 x?.??
-    # - 其他 => 认为是百分比，显示为 ?.?%
+    # - |v| < 10 => 认为是倍率，显示为 x?.??（此时不加 +/- 符号）
+    # - 其他 => 认为是百分比，显示为 +/-?.?%（符号放在数值前）
     v = float(a.value)
     if abs(v) < 10:
         vv = abs(v)
         val = f"x{vv:.2f}"
-    else:
-        vv = abs(v)
-        val = f"{vv:.1f}%"
-    return f"{sign}{label}{val}"
+        return label, val
+
+    vv = abs(v)
+    sign = "+" if a.positive else "-"
+    val = f"{sign}{vv:.1f}%"
+    return label, val
+
+
+def _text_w(draw: ImageDraw.ImageDraw, text: str, *, font: ImageFont.ImageFont) -> int:
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return int(bbox[2] - bbox[0])
+
+
+def _is_attr_part(obj: object) -> bool:
+    return (
+        isinstance(obj, tuple)
+        and len(obj) == 2
+        and isinstance(obj[0], str)
+        and isinstance(obj[1], str)
+    )
+
+
+def _draw_attr_parts_line(
+    draw: ImageDraw.ImageDraw,
+    *,
+    x: int,
+    y: int,
+    attrs: list[tuple[str, str]],
+    max_w: int,
+    font: ImageFont.ImageFont,
+    label_color: tuple[int, int, int, int],
+    value_color: tuple[int, int, int, int],
+) -> None:
+    if not attrs or max_w <= 0:
+        return
+
+    cur_x = int(x)
+    remaining = int(max_w)
+    first = True
+    ell = "…"
+    ell_w = _text_w(draw, ell, font=font)
+
+    for label, value in attrs:
+        sep = "" if first else "，"
+        label_text = f"{sep}{label}"
+        value_text = str(value)
+
+        label_w = _text_w(draw, label_text, font=font)
+        value_w = _text_w(draw, value_text, font=font)
+
+        if label_w + value_w <= remaining:
+            draw.text((cur_x, y), label_text, fill=label_color, font=font)
+            cur_x += label_w
+            draw.text((cur_x, y), value_text, fill=value_color, font=font)
+            cur_x += value_w
+            remaining -= label_w + value_w
+            first = False
+            continue
+
+        # overflow handling
+        if remaining <= ell_w:
+            draw.text((cur_x, y), ell, fill=label_color, font=font)
+            return
+
+        if label_w >= remaining:
+            t = _truncate_text(draw, label_text, font=font, max_w=remaining)
+            draw.text((cur_x, y), t, fill=label_color, font=font)
+            return
+
+        # label fits, value doesn't
+        draw.text((cur_x, y), label_text, fill=label_color, font=font)
+        cur_x += label_w
+        remaining -= label_w
+        t = _truncate_text(draw, value_text, font=font, max_w=remaining)
+        draw.text((cur_x, y), t, fill=value_color, font=font)
+        return
 
 
 def _fmt_polarity(p: str | None) -> str:
@@ -255,6 +474,8 @@ def _render_image(
     *,
     title: str,
     weapon_img: Image.Image | None,
+    weapon_bg_img: Image.Image | None,
+    polarity_icons: dict[str, Image.Image] | None,
     rows: list[dict],
 ) -> bytes:
     margin = 24
@@ -276,11 +497,19 @@ def _render_image(
 
     color_pos = (34, 197, 94, 255)
     color_neg = (239, 68, 68, 255)
+    color_attr_label = (100, 116, 139, 255)
+    color_meta = (71, 85, 105, 255)
+
+    header_size = (width, margin + header_h + 8)
+    if weapon_bg_img is not None:
+        icon_bg = _resize_cover(weapon_bg_img, size=header_size)
+        icon_bg = _apply_alpha(icon_bg, factor=0.28)
+        bg.alpha_composite(icon_bg, (0, 0))
 
     header_grad = _linear_gradient(
-        size=(width, margin + header_h + 8),
-        left=(239, 246, 255, 255),
-        right=(245, 243, 255, 255),
+        size=header_size,
+        left=(239, 246, 255, 232),
+        right=(245, 243, 255, 232),
     )
     bg.alpha_composite(header_grad, (0, 0))
 
@@ -358,31 +587,78 @@ def _render_image(
         if dot_x + 10 < right_x:
             d.ellipse((dot_x, dot_y, dot_x + 10, dot_y + 10), fill=status_dot)
 
-        meta = str(r.get("meta") or "")
-        if meta:
-            meta_text = _truncate_text(d, meta, font=font_meta, max_w=max_left_w)
-            d.text(
-                (name_x, row_y + 46),
-                meta_text,
-                fill=(71, 85, 105, 255),
-                font=font_meta,
-            )
+        meta_y = row_y + 46
+        mr_val = r.get("mr")
+        rr_val = r.get("rr")
+        pol_val = r.get("polarity")
+
+        cur_x = name_x
+        remain = max_left_w
+
+        if mr_val is not None:
+            mr_text = f"MR{int(mr_val)}"
+            mr_text = _truncate_text(d, mr_text, font=font_meta, max_w=remain)
+            if mr_text:
+                d.text((cur_x, meta_y), mr_text, fill=color_meta, font=font_meta)
+                w = _text_w(d, mr_text, font=font_meta)
+                cur_x += w + 14
+                remain = max(0, remain - w - 14)
+
+        # Polarity as icon when possible.
+        if pol_val and remain > 0:
+            icon_size = 18
+            pol_key = str(pol_val).strip().lower()
+            icon = (polarity_icons or {}).get(pol_key)
+            if icon is not None and remain >= icon_size:
+                bg.alpha_composite(icon, (int(cur_x), int(meta_y + 2)))
+                cur_x += icon_size + 14
+                remain = max(0, remain - icon_size - 14)
+            else:
+                pol_text = f"极性{_fmt_polarity(str(pol_val))}"
+                pol_text = _truncate_text(d, pol_text, font=font_meta, max_w=remain)
+                if pol_text:
+                    d.text((cur_x, meta_y), pol_text, fill=color_meta, font=font_meta)
+                    w = _text_w(d, pol_text, font=font_meta)
+                    cur_x += w + 14
+                    remain = max(0, remain - w - 14)
+
+        if rr_val is not None and remain > 0:
+            rr_text = f"洗练{int(rr_val)}"
+            rr_text = _truncate_text(d, rr_text, font=font_meta, max_w=remain)
+            if rr_text:
+                d.text((cur_x, meta_y), rr_text, fill=color_meta, font=font_meta)
 
         pos_attrs = r.get("pos_attrs")
         neg_attrs = r.get("neg_attrs")
-        pos_list = [str(x) for x in pos_attrs] if isinstance(pos_attrs, list) else []
-        neg_list = [str(x) for x in neg_attrs] if isinstance(neg_attrs, list) else []
+        pos_list = list(pos_attrs) if isinstance(pos_attrs, list) else []
+        neg_list = list(neg_attrs) if isinstance(neg_attrs, list) else []
 
-        pos_line = "，".join([p for p in pos_list if p.strip()])
-        neg_line = "，".join([p for p in neg_list if p.strip()])
-        if not neg_line:
-            neg_line = "无负面词条"
+        if pos_list:
+            _draw_attr_parts_line(
+                d,
+                x=name_x,
+                y=row_y + 72,
+                attrs=[p for p in pos_list if _is_attr_part(p)],
+                max_w=max_left_w,
+                font=font_attr,
+                label_color=color_attr_label,
+                value_color=color_pos,
+            )
 
-        pos_text = _truncate_text(d, pos_line, font=font_attr, max_w=max_left_w)
-        neg_text = _truncate_text(d, neg_line, font=font_attr, max_w=max_left_w)
-        if pos_text:
-            d.text((name_x, row_y + 72), pos_text, fill=color_pos, font=font_attr)
-        d.text((name_x, row_y + 94), neg_text, fill=color_neg, font=font_attr)
+        if not neg_list:
+            neg_text = _truncate_text(d, "无负面词条", font=font_attr, max_w=max_left_w)
+            d.text((name_x, row_y + 94), neg_text, fill=color_neg, font=font_attr)
+        else:
+            _draw_attr_parts_line(
+                d,
+                x=name_x,
+                y=row_y + 94,
+                attrs=[p for p in neg_list if _is_attr_part(p)],
+                max_w=max_left_w,
+                font=font_attr,
+                label_color=color_attr_label,
+                value_color=color_neg,
+            )
 
         d.text(
             (row_x1 - 18 - pw, row_y + 30),
@@ -399,6 +675,7 @@ def _render_image(
 async def render_wmr_auctions_image_to_file(
     *,
     weapon: RivenWeapon,
+    weapon_display_name: str,
     auctions: list[RivenAuction],
     platform: str,
     summary: str,
@@ -411,11 +688,16 @@ async def render_wmr_auctions_image_to_file(
 
     # 武器图
     weapon_img: Image.Image | None = None
+    weapon_bg_img: Image.Image | None = None
     weapon_asset = weapon.thumb or weapon.icon
     if weapon_asset:
         b = await _download_bytes(_asset_url(weapon_asset))
         if b:
-            weapon_img = _open_image_rgba(b, size=(96, 96))
+            weapon_img = _open_image_rgba(b, size=(96, 96), contain=True)
+            try:
+                weapon_bg_img = Image.open(io.BytesIO(b)).convert("RGBA")
+            except Exception:
+                weapon_bg_img = None
 
     # 并发下载头像
     avatar_urls: list[str] = []
@@ -443,36 +725,52 @@ async def render_wmr_auctions_image_to_file(
     for i, a in enumerate(auctions):
         name = (a.owner_name or "unknown").strip() or "unknown"
         status = a.owner_status
-        pol = _fmt_polarity(a.polarity)
         mr = a.mastery_level
         rr = a.re_rolls
-        meta_parts: list[str] = []
-        if mr is not None:
-            meta_parts.append(f"MR{mr}")
-        if pol:
-            meta_parts.append(f"极性{pol}")
-        if rr is not None:
-            meta_parts.append(f"洗练{rr}")
-
         pos = [x for x in a.attributes if x.positive]
         neg = [x for x in a.attributes if not x.positive]
-        pos_texts = [_fmt_attr(x) for x in pos]
-        neg_texts = [_fmt_attr(x) for x in neg]
+        pos_parts = [_fmt_attr_parts(x) for x in pos]
+        neg_parts = [_fmt_attr_parts(x) for x in neg]
 
         rows.append(
             {
                 "price": a.buyout_price,
                 "name": name,
                 "status": status,
-                "meta": "  ".join(meta_parts),
-                "pos_attrs": pos_texts,
-                "neg_attrs": neg_texts,
+                "mr": mr,
+                "polarity": a.polarity,
+                "rr": rr,
+                "pos_attrs": pos_parts,
+                "neg_attrs": neg_parts,
                 "avatar": avatars[i] if i < len(avatars) else None,
             }
         )
 
-    title = f"紫卡 {weapon.item_name}（{platform}） 前{limit}"
-    img_bytes = _render_image(title=title, weapon_img=weapon_img, rows=rows)
+    name = (weapon_display_name or weapon.item_name or "").strip() or weapon.item_name
+    title = f"紫卡 {name}（{platform}） 前{limit}"
+
+    # Prefetch polarity icons (best-effort). If cairosvg isn't available or the icon
+    # can't be downloaded/rasterized, we fallback to text in rendering.
+    polarity_icons: dict[str, Image.Image] = {}
+    unique_polarities = {
+        (a.polarity or "").strip().lower()
+        for a in auctions
+        if (a.polarity or "").strip()
+    }
+    for p in unique_polarities:
+        if p not in _WFM_POLARITY_ICONS:
+            continue
+        icon = await _get_polarity_icon(p, size=18)
+        if icon is not None:
+            polarity_icons[p] = icon
+
+    img_bytes = _render_image(
+        title=title,
+        weapon_img=weapon_img,
+        weapon_bg_img=weapon_bg_img,
+        polarity_icons=polarity_icons,
+        rows=rows,
+    )
 
     file_path = temp_dir / f"wmr_{uuid.uuid4().hex}.png"
     try:

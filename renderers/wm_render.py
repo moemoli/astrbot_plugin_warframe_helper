@@ -96,12 +96,27 @@ def _load_font(
 
 
 def _open_image_rgba(
-    image_bytes: bytes, *, size: tuple[int, int]
+    image_bytes: bytes,
+    *,
+    size: tuple[int, int],
+    contain: bool = False,
 ) -> Image.Image | None:
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
-        img = img.resize(size, Image.Resampling.LANCZOS)
-        return img
+        if not contain:
+            return img.resize(size, Image.Resampling.LANCZOS)
+
+        tw, th = size
+        if tw <= 0 or th <= 0:
+            return img
+
+        # Keep aspect ratio, center-pad into target size.
+        img.thumbnail((tw, th), Image.Resampling.LANCZOS)
+        out = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        x = (tw - img.width) // 2
+        y = (th - img.height) // 2
+        out.alpha_composite(img, (x, y))
+        return out
     except Exception:
         return None
 
@@ -188,10 +203,50 @@ def _linear_gradient(
     return img
 
 
+def _resize_cover(img: Image.Image, *, size: tuple[int, int]) -> Image.Image:
+    """Resize image to cover target size while preserving aspect ratio, then center-crop."""
+
+    tw, th = size
+    if tw <= 0 or th <= 0:
+        return img
+
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+
+    sw, sh = img.size
+    if sw <= 0 or sh <= 0:
+        return img
+
+    scale = max(tw / sw, th / sh)
+    nw = max(1, int(round(sw * scale)))
+    nh = max(1, int(round(sh * scale)))
+    resized = img.resize((nw, nh), Image.Resampling.LANCZOS)
+
+    left = max(0, (nw - tw) // 2)
+    top = max(0, (nh - th) // 2)
+    return resized.crop((left, top, left + tw, top + th))
+
+
+def _apply_alpha(img: Image.Image, *, factor: float) -> Image.Image:
+    """Multiply the alpha channel by `factor` (0~1)."""
+
+    f = max(0.0, min(float(factor), 1.0))
+    if f >= 1.0:
+        return img
+
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+
+    r, g, b, a = img.split()
+    a2 = a.point(lambda p: int(p * f))
+    return Image.merge("RGBA", (r, g, b, a2))
+
+
 def _render_image(
     *,
     title: str,
-    item_img: Image.Image | None,
+    item_avatar_img: Image.Image | None,
+    item_bg_img: Image.Image | None,
     rows: list[tuple[int, int, str, str | None, Image.Image]],
 ) -> bytes:
     # 轻量卡片布局（避免引入额外功能，仅做排版美化）
@@ -211,19 +266,25 @@ def _render_image(
     font_name = _load_font(24, weight="medium")
     font_meta = _load_font(20, weight="regular")
 
-    # Header: 轻渐变背景
+    header_size = (width, margin + header_h + 8)
+    if item_bg_img is not None:
+        icon_bg = _resize_cover(item_bg_img, size=header_size)
+        icon_bg = _apply_alpha(icon_bg, factor=0.28)
+        bg.alpha_composite(icon_bg, (0, 0))
+
+    # Header: 轻渐变背景（半透明，遮住背景图标但保留层次）
     header_grad = _linear_gradient(
-        size=(width, margin + header_h + 8),
-        left=(239, 246, 255, 255),
-        right=(245, 243, 255, 255),
+        size=header_size,
+        left=(239, 246, 255, 232),
+        right=(245, 243, 255, 232),
     )
     bg.alpha_composite(header_grad, (0, 0))
 
     # Header
     x = margin
     y = margin
-    if item_img is not None:
-        bg.alpha_composite(_circle_avatar(item_img, size=96), (x, y + 10))
+    if item_avatar_img is not None:
+        bg.alpha_composite(_circle_avatar(item_avatar_img, size=96), (x, y + 10))
         x += 96 + 16
 
     # 标题换行截断（尽量不溢出）
@@ -353,13 +414,18 @@ async def render_wm_orders_image_to_file(
     title = f"{item_name}（{platform}）{action_cn}"
 
     # 下载物品图
-    item_img: Image.Image | None = None
+    item_avatar_img: Image.Image | None = None
+    item_bg_img: Image.Image | None = None
     item_asset = item.thumb or item.icon
     if item_asset:
         item_url = _asset_url(item_asset)
         item_bytes = await _download_bytes(item_url, timeout_sec=10.0)
         if item_bytes:
-            item_img = _open_image_rgba(item_bytes, size=(96, 96))
+            item_avatar_img = _open_image_rgba(item_bytes, size=(96, 96), contain=True)
+            try:
+                item_bg_img = Image.open(io.BytesIO(item_bytes)).convert("RGBA")
+            except Exception:
+                item_bg_img = None
 
     # 并发下载头像
     avatar_urls: list[str | None] = [
@@ -392,7 +458,12 @@ async def render_wm_orders_image_to_file(
             ),
         )
 
-    png = _render_image(title=title, item_img=item_img, rows=rows)
+    png = _render_image(
+        title=title,
+        item_avatar_img=item_avatar_img,
+        item_bg_img=item_bg_img,
+        rows=rows,
+    )
 
     out_dir = Path(get_astrbot_temp_path())
     out_dir.mkdir(parents=True, exist_ok=True)

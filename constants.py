@@ -57,9 +57,18 @@ RIVEN_STAT_ALIASES: dict[str, str] = {
     "g歧视": "damage_vs_grineer",
     "c歧视": "damage_vs_corpus",
     "i歧视": "damage_vs_infested",
+    "s歧视": "damage_vs_sentient",
     "grineer歧视": "damage_vs_grineer",
     "corpus歧视": "damage_vs_corpus",
     "infested歧视": "damage_vs_infested",
+    "sentient歧视": "damage_vs_sentient",
+    "对grineer伤害": "damage_vs_grineer",
+    "对corpus伤害": "damage_vs_corpus",
+    "对infested伤害": "damage_vs_infested",
+    "对gineer伤害": "damage_vs_grineer",
+    "对grineer": "damage_vs_grineer",
+    "对corpus": "damage_vs_corpus",
+    "对infested": "damage_vs_infested",
 }
 
 RIVEN_POLARITY_CN: dict[str, str] = {
@@ -85,7 +94,8 @@ RIVEN_STAT_CN: dict[str, str] = {
     "magazine_capacity": "弹匣",
     "reload_speed": "装填",
     "zoom": "变焦",
-    "damage_vs_grineer": "G歧视",
-    "damage_vs_corpus": "C歧视",
-    "damage_vs_infested": "I歧视",
+    "damage_vs_grineer": "对Grineer伤害",
+    "damage_vs_corpus": "对Corpus伤害",
+    "damage_vs_infested": "对Infested伤害",
+    "damage_vs_sentient": "对Sentient伤害",
 }
