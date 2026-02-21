@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+from fnmatch import fnmatch
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 
 from astrbot.api import logger
 
 _proxy_url: str | None = None
+_direct_domains: list[str] = []
 
 
 def set_proxy_url(proxy_url: str | None) -> None:
@@ -27,15 +30,81 @@ def set_proxy_url(proxy_url: str | None) -> None:
     _proxy_url = p if p else None
 
 
+def set_direct_domains(domains: list[str] | None) -> None:
+    """Set direct-connect domain patterns.
+
+    When `proxy_url` is set, requests whose URL hostname matches any pattern in this list
+    will NOT use the configured proxy.
+
+    Patterns support glob syntax like: `x.com`, `*.x.com`.
+    """
+
+    global _direct_domains
+    if not domains:
+        _direct_domains = []
+        return
+
+    out: list[str] = []
+    for d in domains:
+        s = str(d or "").strip().lower()
+        if not s:
+            continue
+
+        # Allow users to paste a full URL; extract hostname.
+        try:
+            if "://" in s:
+                host = urlsplit(s).hostname
+                s = (host or "").strip().lower()
+        except Exception:
+            pass
+
+        # Strip path if any.
+        if "/" in s:
+            s = s.split("/", 1)[0].strip().lower()
+
+        # Strip port if present.
+        if ":" in s:
+            s = s.split(":", 1)[0].strip().lower()
+
+        if s and s not in out:
+            out.append(s)
+
+    _direct_domains = out
+
+
 def get_proxy_url() -> str | None:
     return _proxy_url
 
 
-def _request_kwargs() -> dict[str, Any]:
-    """Build aiohttp per-request kwargs (proxy etc)."""
+def _url_hostname(url: str) -> str:
+    u = str(url or "").strip()
+    if not u:
+        return ""
+    try:
+        host = urlsplit(u).hostname
+        return str(host or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _should_bypass_proxy(url: str) -> bool:
+    host = _url_hostname(url)
+    if not host:
+        return False
+    for pattern in _direct_domains:
+        try:
+            if fnmatch(host, pattern):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def request_kwargs_for_url(url: str) -> dict[str, Any]:
+    """Build aiohttp per-request kwargs (proxy etc) for a specific URL."""
 
     kw: dict[str, Any] = {}
-    if _proxy_url:
+    if _proxy_url and not _should_bypass_proxy(url):
         kw["proxy"] = _proxy_url
     return kw
 
@@ -65,12 +134,11 @@ async def fetch_bytes(
     req_headers = {**_default_headers(), **(headers or {})}
     timeout = aiohttp.ClientTimeout(total=float(timeout_sec))
 
-    req_kw = _request_kwargs()
-
     async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
         last_err: str | None = None
         for url in url_list:
             try:
+                req_kw = request_kwargs_for_url(url)
                 async with session.get(url, headers=req_headers, **req_kw) as resp:
                     if resp.status != 200:
                         last_err = f"{resp.status} {url}"

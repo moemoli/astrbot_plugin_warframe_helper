@@ -14,7 +14,7 @@ from .components.event_ttl_cache import EventScopedTTLCache
 from .components.qq_official_webhook import QQOfficialWebhookPager
 from .handlers.qq_interaction import handle_qq_interaction_create
 from .handlers.wm_pick import handle_wm_pick_number
-from .http_utils import set_proxy_url
+from .http_utils import set_direct_domains, set_proxy_url
 from .mappers.riven_mapping import WarframeRivenWeaponMapper
 from .mappers.riven_stats_mapping import WarframeRivenStatMapper
 from .mappers.term_mapping import WarframeTermMapper
@@ -40,9 +40,18 @@ class WarframeHelperPlugin(Star):
         try:
             proxy_url = self.config.get("proxy_url") if self.config else None
             set_proxy_url(proxy_url)
+
+            direct_domains = None
+            if self.config:
+                direct_domains = self.config.get("direct_domains")
+            if isinstance(direct_domains, list):
+                set_direct_domains(direct_domains)
+            else:
+                set_direct_domains(None)
         except Exception:
             # Never fail plugin init due to proxy config.
             set_proxy_url(None)
+            set_direct_domains(None)
 
         self.term_mapper = WarframeTermMapper()
         self.riven_weapon_mapper = WarframeRivenWeaponMapper()

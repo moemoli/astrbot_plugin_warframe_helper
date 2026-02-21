@@ -7,6 +7,8 @@ import aiohttp
 
 from astrbot.api import logger
 
+from ..http_utils import request_kwargs_for_url
+
 WARFRAME_MARKET_V2_BASE_URL = "https://api.warframe.market/v2"
 WARFRAME_MARKET_V1_BASE_URL = "https://api.warframe.market/v1"
 
@@ -54,7 +56,8 @@ class WarframeMarketClient:
             async with aiohttp.ClientSession(
                 timeout=self._timeout, trust_env=True
             ) as s:
-                async with s.get(url, headers=headers) as resp:
+                req_kw = request_kwargs_for_url(url)
+                async with s.get(url, headers=headers, **req_kw) as resp:
                     if resp.status != 200:
                         return []
                     payload = await resp.json()
@@ -203,7 +206,8 @@ class WarframeMarketClient:
             async with aiohttp.ClientSession(
                 timeout=self._timeout, trust_env=True
             ) as s:
-                async with s.get(url, headers=headers) as resp:
+                req_kw = request_kwargs_for_url(url)
+                async with s.get(url, headers=headers, **req_kw) as resp:
                     if resp.status != 200:
                         return []
                     payload = await resp.json()

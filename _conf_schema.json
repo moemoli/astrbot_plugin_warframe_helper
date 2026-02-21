@@ -5,6 +5,12 @@
         "description": "HTTP 代理（可选）",
         "hint": "为空时使用系统/环境代理（aiohttp trust_env）。非空时将强制所有插件请求使用该代理。格式示例：http://127.0.0.1:7890"
     },
+    "direct_domains": {
+        "type": "list",
+        "default": [],
+        "description": "直连域名列表（绕过插件代理）",
+        "hint": "当 proxy_url 非空时，匹配此列表的域名将不使用 proxy_url。支持通配符，例如：x.com、*.x.com。注意：*.x.com 仅匹配子域名，不匹配根域名 x.com。"
+    },
     "unknown_abbrev_provider_id": {
         "type": "string",
         "default": "",
