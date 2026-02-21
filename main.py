@@ -25,7 +25,7 @@ from .services.market.wm import cmd_wm
 from .services.market.wmr import cmd_wmr
 from .services.subscriptions import SubscriptionService
 
-QQ_OFFICIAL_WEBHOOK_PAGER_TEMPLATE_ID_DEFAULT = "102070299_1771653647"
+QQ_OFFICIAL_WEBHOOK_PAGER_TEMPLATE_ID_DEFAULT = ""
 
 
 @register("warframe_helper", "moemoli", "Warframe 助手", "v0.0.1")
@@ -58,7 +58,7 @@ class WarframeHelperPlugin(Star):
         # Current schema stores QQ official webhook settings under `sub_config`.
         sub_config: object = {}
         try:
-            sub_config = (self.config or {}).get("sub_config") or {}
+            sub_config = (self.config or {}).get("qq_official") or {}
         except Exception:
             sub_config = {}
 
@@ -67,13 +67,13 @@ class WarframeHelperPlugin(Star):
         markdown_tpl = ""
         if isinstance(sub_config, dict):
             enable_md = bool(
-                sub_config.get("qq_official_webhook_enable_markdown_reply")
+                sub_config.get("webhook_enable_markdown_reply")
             )
             keyboard_tpl = str(
-                sub_config.get("qq_official_webhook_pager_keyboard_template_id") or ""
+                sub_config.get("webhook_pager_keyboard_template_id") or ""
             ).strip()
             markdown_tpl = str(
-                sub_config.get("qq_official_webhook_markdown_template_id") or ""
+                sub_config.get("webhook_markdown_template_id") or ""
             ).strip()
 
         # QQ official webhook keyboard template id (message buttons).
