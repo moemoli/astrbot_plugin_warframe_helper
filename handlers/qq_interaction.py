@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import cast
 
-from astrbot.api import logger
 from astrbot.api.platform import MessageType
 
 from ..clients.market_client import WarframeMarketClient
@@ -152,15 +151,6 @@ async def handle_qq_interaction_create(
     state["limit"] = limit
     pager_cache.put_by_origin_sender(origin=origin, sender_id=sender_id, state=state)
 
-    try:
-        from astrbot.api.event import MessageChain
-        from astrbot.api.message_components import Image
-        from astrbot.core.platform.message_session import MessageSession
-    except Exception:
-        return
-
-    session = MessageSession(platform_id, message_type, session_id)
-
     if kind == "wm":
         item = state.get("item")
         platform_norm = str(state.get("platform") or "pc")
@@ -223,7 +213,7 @@ async def handle_qq_interaction_create(
             )
             return
 
-        ok = await qq_pager.send_result_markdown_with_keyboard_interaction(
+        await qq_pager.send_result_markdown_with_keyboard_interaction(
             bot,
             interaction,
             kind="/wm",
@@ -231,25 +221,8 @@ async def handle_qq_interaction_create(
             image_path=rendered.path,
             reply_to_msg_id=reply_to_msg_id,
         )
-        if ok:
-            return
-
-        try:
-            await platform.send_by_session(
-                session,
-                MessageChain([Image.fromFileSystem(rendered.path)]),
-            )
-        except Exception as exc:
-            logger.warning(f"QQ interaction paging send image failed: {exc!s}")
-            return
-
-        await qq_pager.send_pager_keyboard_interaction(
-            bot,
-            interaction,
-            kind="/wm",
-            page=page,
-            reply_to_msg_id=reply_to_msg_id,
-        )
+        # For interaction callbacks, do not fallback to image sending.
+        # A successful callback implies markdown+keyboard has worked before.
         return
 
     if kind == "wmr":
@@ -353,7 +326,7 @@ async def handle_qq_interaction_create(
             )
             return
 
-        ok = await qq_pager.send_result_markdown_with_keyboard_interaction(
+        await qq_pager.send_result_markdown_with_keyboard_interaction(
             bot,
             interaction,
             kind="/wmr",
@@ -361,25 +334,7 @@ async def handle_qq_interaction_create(
             image_path=rendered.path,
             reply_to_msg_id=reply_to_msg_id,
         )
-        if ok:
-            return
-
-        try:
-            await platform.send_by_session(
-                session,
-                MessageChain([Image.fromFileSystem(rendered.path)]),
-            )
-        except Exception as exc:
-            logger.warning(f"QQ interaction paging send image failed: {exc!s}")
-            return
-
-        await qq_pager.send_pager_keyboard_interaction(
-            bot,
-            interaction,
-            kind="/wmr",
-            page=page,
-            reply_to_msg_id=reply_to_msg_id,
-        )
+        # For interaction callbacks, do not fallback to image sending.
         return
 
     await qq_pager.send_markdown_notice_interaction(

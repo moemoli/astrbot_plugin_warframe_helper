@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import random
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from urllib.parse import urljoin
 
 from astrbot.api import logger
@@ -21,10 +23,69 @@ class QQOfficialWebhookPager:
         self._markdown_template_id = (markdown_template_id or "").strip()
         self._enable_markdown_reply = bool(enable_markdown_reply)
         self._public_base_url = (public_base_url or "").strip().rstrip("/")
+        self._placeholder_image_path: str | None = None
         self._interaction_handler: (
             Callable[[object, object], Awaitable[None]] | None
         ) = None
         self._hooked_client_ids: set[int] = set()
+
+    def _template_markdown(
+        self,
+        *,
+        title: str,
+        kind: str,
+        page: str,
+        hint: str,
+        image_url: str,
+        image_width: int,
+        image_height: int,
+    ) -> dict:
+        return {
+            "custom_template_id": self._markdown_template_id,
+            "params": [
+                {"key": "title", "values": [str(title).strip() or "Warframe 助手"]},
+                {"key": "kind", "values": [str(kind).strip() or "-"]},
+                {"key": "page", "values": [str(page).strip() or "-"]},
+                {"key": "hint", "values": [str(hint).strip() or " "]},
+                {"key": "image", "values": [str(image_url).strip() or " "]},
+                {"key": "image_w", "values": [str(max(1, int(image_width)))]},
+                {"key": "image_h", "values": [str(max(1, int(image_height)))]},
+            ],
+        }
+
+    def _ensure_placeholder_image_path(self) -> str | None:
+        if self._placeholder_image_path:
+            return self._placeholder_image_path
+
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+        except Exception:
+            return None
+
+        try:
+            temp_dir = Path(get_astrbot_temp_path())
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            placeholder = temp_dir / "wf_helper_blank_1x1.png"
+            if not placeholder.exists():
+                png_1x1 = base64.b64decode(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMBAp7W7b8AAAAASUVORK5CYII="
+                )
+                placeholder.write_bytes(png_1x1)
+            self._placeholder_image_path = str(placeholder)
+            return self._placeholder_image_path
+        except Exception:
+            return None
+
+    async def _get_placeholder_image_url(self) -> str | None:
+        if not self._public_base_url:
+            return None
+        path = self._ensure_placeholder_image_path()
+        if not path:
+            return None
+        token = await self._register_file_token(path)
+        if not token:
+            return None
+        return self._build_public_file_url(token)
 
     def _build_public_file_url(self, file_token: str) -> str | None:
         if not self._public_base_url or not file_token:
@@ -64,6 +125,12 @@ class QQOfficialWebhookPager:
         """
 
         if not self.keyboard_enabled_for(event):
+            return False
+
+        if not self._markdown_template_id:
+            logger.warning(
+                "QQ markdown template reply requires `webhook_markdown_template_id` to be configured."
+            )
             return False
 
         if not self._public_base_url:
@@ -110,6 +177,12 @@ class QQOfficialWebhookPager:
         if not self.enabled_for(event):
             return False
 
+        if not self._markdown_template_id:
+            logger.warning(
+                "QQ markdown template reply requires `webhook_markdown_template_id` to be configured."
+            )
+            return False
+
         if not self._public_base_url:
             logger.warning(
                 "QQ markdown-with-image requires `webhook_public_base_url` to be configured."
@@ -146,9 +219,25 @@ class QQOfficialWebhookPager:
         content: str,
         reply_to_msg_id: str | None = None,
     ) -> bool:
-        """Send ONE markdown message using markdown.content (no keyboard)."""
+        """Send ONE markdown message using markdown template (no keyboard).
+
+        Note: QQ official bots may not have permission to send free-form markdown.
+        This method always sends via template (`custom_template_id`) only.
+        """
 
         if not self.enabled_for(event):
+            return False
+
+        if not self._markdown_template_id:
+            logger.warning(
+                "QQ markdown template reply requires `webhook_markdown_template_id` to be configured."
+            )
+            return False
+
+        if not self._public_base_url:
+            logger.warning(
+                "QQ markdown template reply requires `webhook_public_base_url` to be configured."
+            )
             return False
 
         self._maybe_hook_interactions(event)
@@ -166,11 +255,21 @@ class QQOfficialWebhookPager:
 
         source = getattr(event.message_obj, "raw_message", None)
 
-        md_title = str(title).strip() or "提示"
         body = str(content or "").strip()
-        markdown: dict = {
-            "content": f"# {md_title}\n\n{body}" if body else f"# {md_title}",
-        }
+
+        placeholder_url = await self._get_placeholder_image_url()
+        if not placeholder_url:
+            return False
+
+        markdown: dict = self._template_markdown(
+            title=str(title).strip() or "提示",
+            kind="-",
+            page="-",
+            hint=body or " ",
+            image_url=placeholder_url,
+            image_width=1,
+            image_height=1,
+        )
 
         msg_id = reply_to_msg_id or getattr(event.message_obj, "message_id", None)
 
@@ -331,35 +430,17 @@ class QQOfficialWebhookPager:
         source = getattr(event.message_obj, "raw_message", None)
         page_norm = max(1, int(page))
 
-        def build_template_markdown() -> dict:
-            return {
-                "custom_template_id": self._markdown_template_id,
-                "params": [
-                    {"key": "title", "values": [str(title).strip() or "Warframe 助手"]},
-                    {"key": "kind", "values": [str(kind)]},
-                    {"key": "page", "values": [f"第{page_norm}页"]},
-                    {"key": "hint", "values": [str(hint)]},
-                    {"key": "image", "values": [str(image_url)]},
-                    {"key": "image_w", "values": [str(max(1, int(image_width)))]},
-                    {"key": "image_h", "values": [str(max(1, int(image_height)))]},
-                ],
-            }
+        if not self._markdown_template_id:
+            return False
 
-        def build_plain_markdown() -> dict:
-            image_md = (
-                str(image_markdown or "").strip() or f"![result]({str(image_url)})"
-            )
-            md = (
-                f"# {str(title).strip() or 'Warframe 助手'}\n\n"
-                f"{image_md}\n\n"
-                f"**指令**：{str(kind)}  \n**页数**：第{page_norm}页  \n\n{str(hint)}"
-            )
-            return {"content": md}
-
-        markdown: dict = (
-            build_template_markdown()
-            if self._markdown_template_id
-            else build_plain_markdown()
+        markdown: dict = self._template_markdown(
+            title=title,
+            kind=kind,
+            page=f"第{page_norm}页",
+            hint=hint,
+            image_url=image_url,
+            image_width=image_width,
+            image_height=image_height,
         )
 
         msg_id = reply_to_msg_id or getattr(event.message_obj, "message_id", None)
@@ -421,20 +502,6 @@ class QQOfficialWebhookPager:
             await bot.api._http.request(route, json=payload)
             return True
         except Exception as exc:
-            if self._markdown_template_id:
-                try:
-                    payload_fallback = dict(payload)
-                    payload_fallback["markdown"] = build_plain_markdown()
-                    await bot.api._http.request(route, json=payload_fallback)
-                    return True
-                except Exception as exc2:
-                    logger.warning(
-                        "QQ markdown+keyboard send failed: %s; fallback failed: %s",
-                        str(exc),
-                        str(exc2),
-                    )
-                    return False
-
             logger.warning(f"QQ markdown+keyboard send failed: {exc!s}")
             return False
 
@@ -460,35 +527,17 @@ class QQOfficialWebhookPager:
 
         page_norm = max(1, int(page))
 
-        def build_template_markdown() -> dict:
-            return {
-                "custom_template_id": self._markdown_template_id,
-                "params": [
-                    {"key": "title", "values": [str(title).strip() or "Warframe 助手"]},
-                    {"key": "kind", "values": [str(kind)]},
-                    {"key": "page", "values": [f"第{page_norm}页"]},
-                    {"key": "hint", "values": [str(hint)]},
-                    {"key": "image", "values": [str(image_url)]},
-                    {"key": "image_w", "values": [str(max(1, int(image_width)))]},
-                    {"key": "image_h", "values": [str(max(1, int(image_height)))]},
-                ],
-            }
+        if not self._markdown_template_id:
+            return False
 
-        def build_plain_markdown() -> dict:
-            image_md = (
-                str(image_markdown or "").strip() or f"![result]({str(image_url)})"
-            )
-            md = (
-                f"# {str(title).strip() or 'Warframe 助手'}\n\n"
-                f"{image_md}\n\n"
-                f"**指令**：{str(kind)}  \n**页数**：第{page_norm}页  \n\n{str(hint)}"
-            )
-            return {"content": md}
-
-        markdown: dict = (
-            build_template_markdown()
-            if self._markdown_template_id
-            else build_plain_markdown()
+        markdown: dict = self._template_markdown(
+            title=title,
+            kind=kind,
+            page=f"第{page_norm}页",
+            hint=hint,
+            image_url=image_url,
+            image_width=image_width,
+            image_height=image_height,
         )
 
         msg_id = reply_to_msg_id
@@ -535,20 +584,6 @@ class QQOfficialWebhookPager:
             await bot.api._http.request(route, json=payload)  # type: ignore[attr-defined]
             return True
         except Exception as exc:
-            if self._markdown_template_id:
-                try:
-                    payload_fallback = dict(payload)
-                    payload_fallback["markdown"] = build_plain_markdown()
-                    await bot.api._http.request(route, json=payload_fallback)  # type: ignore[attr-defined]
-                    return True
-                except Exception as exc2:
-                    logger.warning(
-                        "QQ markdown+keyboard send failed (interaction): %s; fallback failed: %s",
-                        str(exc),
-                        str(exc2),
-                    )
-                    return False
-
             logger.warning(f"QQ markdown+keyboard send failed (interaction): {exc!s}")
             return False
 
@@ -581,31 +616,17 @@ class QQOfficialWebhookPager:
 
         source = getattr(event.message_obj, "raw_message", None)
 
-        def build_template_markdown() -> dict:
-            return {
-                "custom_template_id": self._markdown_template_id,
-                "params": [
-                    {"key": "title", "values": [str(title).strip() or "Warframe 助手"]},
-                    {"key": "kind", "values": [str(kind)]},
-                    {"key": "page", "values": [" "]},
-                    {"key": "hint", "values": [" "]},
-                    {"key": "image", "values": [str(image_url)]},
-                    {"key": "image_w", "values": [str(max(1, int(image_width)))]},
-                    {"key": "image_h", "values": [str(max(1, int(image_height)))]},
-                ],
-            }
+        if not self._markdown_template_id:
+            return False
 
-        def build_plain_markdown() -> dict:
-            image_md = (
-                str(image_markdown or "").strip() or f"![result]({str(image_url)})"
-            )
-            md = f"# {str(title).strip() or 'Warframe 助手'}\n\n{image_md}"
-            return {"content": md}
-
-        markdown: dict = (
-            build_template_markdown()
-            if self._markdown_template_id
-            else build_plain_markdown()
+        markdown: dict = self._template_markdown(
+            title=title,
+            kind=kind,
+            page=" ",
+            hint=" ",
+            image_url=image_url,
+            image_width=image_width,
+            image_height=image_height,
         )
 
         msg_id = reply_to_msg_id or getattr(event.message_obj, "message_id", None)
@@ -656,20 +677,6 @@ class QQOfficialWebhookPager:
             await bot.api._http.request(route, json=payload)
             return True
         except Exception as exc:
-            if self._markdown_template_id:
-                try:
-                    payload_fallback = dict(payload)
-                    payload_fallback["markdown"] = build_plain_markdown()
-                    await bot.api._http.request(route, json=payload_fallback)
-                    return True
-                except Exception as exc2:
-                    logger.warning(
-                        "QQ markdown image send failed: %s; fallback failed: %s",
-                        str(exc),
-                        str(exc2),
-                    )
-                    return False
-
             logger.warning(f"QQ markdown image send failed: {exc!s}")
             return False
 
@@ -698,7 +705,45 @@ class QQOfficialWebhookPager:
 
         prev = getattr(bot, "on_interaction_create", None)
 
+        def _is_pager_interaction(interaction: object) -> bool:
+            try:
+                resolved = getattr(getattr(interaction, "data", None), "resolved", None)
+                button_data = getattr(resolved, "button_data", None)
+                button_id = getattr(resolved, "button_id", None)
+                raw = str(button_data or button_id or "").strip().lower()
+            except Exception:
+                raw = ""
+            if not raw:
+                return False
+
+            if raw in {
+                "wfp:prev",
+                "prev",
+                "previous",
+                "上一页",
+                "上",
+                "up",
+            } or raw.endswith(":prev"):
+                return True
+
+            if raw in {"wfp:next", "next", "下一页", "下", "down"} or raw.endswith(
+                ":next"
+            ):
+                return True
+
+            return False
+
         async def on_interaction_create(interaction):
+            # For our paging buttons, handle it directly.
+            # The callback itself implies markdown+keyboard has already been sent successfully,
+            # so we avoid chaining to previous handlers to prevent duplicate sends.
+            if _is_pager_interaction(interaction):
+                try:
+                    await interaction_handler(bot, interaction)
+                except Exception as exc:
+                    logger.warning(f"QQ interaction handler failed: {exc!s}")
+                return
+
             if callable(prev) and prev is not on_interaction_create:
                 try:
                     import inspect
@@ -750,6 +795,9 @@ class QQOfficialWebhookPager:
         if not self.keyboard_enabled_for(event):
             return
 
+        if not self._markdown_template_id:
+            return
+
         self._maybe_hook_interactions(event)
 
         bot = getattr(event, "bot", None)
@@ -767,29 +815,18 @@ class QQOfficialWebhookPager:
 
         page_norm = max(1, int(page))
 
-        markdown_text = f"翻页：{kind} 第{page_norm}页\n\n使用下方按钮上一页/下一页"
+        placeholder_url = await self._get_placeholder_image_url()
+        if not placeholder_url:
+            return
 
-        def build_template_markdown() -> dict:
-            # Template variables are defined in the QQ bot console.
-            # If the user's template uses different keys, QQ will reject the payload.
-            # We'll fallback to plain markdown content in that case.
-            return {
-                "custom_template_id": self._markdown_template_id,
-                "params": [
-                    {"key": "title", "values": ["Warframe 助手"]},
-                    {"key": "kind", "values": [str(kind)]},
-                    {"key": "page", "values": [f"第{page_norm}页"]},
-                    {"key": "hint", "values": ["使用下方按钮：上一页 / 下一页"]},
-                ],
-            }
-
-        def build_plain_markdown() -> dict:
-            return {"content": markdown_text}
-
-        markdown: dict = (
-            build_template_markdown()
-            if self._markdown_template_id
-            else build_plain_markdown()
+        markdown: dict = self._template_markdown(
+            title="Warframe 助手",
+            kind=kind,
+            page=f"第{page_norm}页",
+            hint="使用下方按钮：上一页 / 下一页",
+            image_url=placeholder_url,
+            image_width=1,
+            image_height=1,
         )
 
         msg_id = reply_to_msg_id or getattr(event.message_obj, "message_id", None)
@@ -852,22 +889,6 @@ class QQOfficialWebhookPager:
             await bot.api._http.request(route, json=payload)
             return
         except Exception as exc:
-            # If a custom markdown template is configured, the most common failure
-            # is "markdown parameter error" due to mismatched template keys.
-            if self._markdown_template_id:
-                try:
-                    payload_fallback = dict(payload)
-                    payload_fallback["markdown"] = build_plain_markdown()
-                    await bot.api._http.request(route, json=payload_fallback)
-                    return
-                except Exception as exc2:
-                    logger.warning(
-                        "QQ pager keyboard send failed: %s; fallback failed: %s",
-                        str(exc),
-                        str(exc2),
-                    )
-                    return
-
             logger.warning(f"QQ pager keyboard send failed: {exc!s}")
             return
 
@@ -887,26 +908,21 @@ class QQOfficialWebhookPager:
 
         page_norm = max(1, int(page))
 
-        markdown_text = f"翻页：{kind} 第{page_norm}页\n\n使用下方按钮上一页/下一页"
+        if not self._markdown_template_id:
+            return
 
-        def build_template_markdown() -> dict:
-            return {
-                "custom_template_id": self._markdown_template_id,
-                "params": [
-                    {"key": "title", "values": ["Warframe 助手"]},
-                    {"key": "kind", "values": [str(kind)]},
-                    {"key": "page", "values": [f"第{page_norm}页"]},
-                    {"key": "hint", "values": ["使用下方按钮：上一页 / 下一页"]},
-                ],
-            }
+        placeholder_url = await self._get_placeholder_image_url()
+        if not placeholder_url:
+            return
 
-        def build_plain_markdown() -> dict:
-            return {"content": markdown_text}
-
-        markdown: dict = (
-            build_template_markdown()
-            if self._markdown_template_id
-            else build_plain_markdown()
+        markdown: dict = self._template_markdown(
+            title="Warframe 助手",
+            kind=kind,
+            page=f"第{page_norm}页",
+            hint="使用下方按钮：上一页 / 下一页",
+            image_url=placeholder_url,
+            image_width=1,
+            image_height=1,
         )
 
         msg_id = reply_to_msg_id
@@ -954,20 +970,6 @@ class QQOfficialWebhookPager:
             await bot.api._http.request(route, json=payload)  # type: ignore[attr-defined]
             return
         except Exception as exc:
-            if self._markdown_template_id:
-                try:
-                    payload_fallback = dict(payload)
-                    payload_fallback["markdown"] = build_plain_markdown()
-                    await bot.api._http.request(route, json=payload_fallback)  # type: ignore[attr-defined]
-                    return
-                except Exception as exc2:
-                    logger.warning(
-                        "QQ pager keyboard send failed (interaction): %s; fallback failed: %s",
-                        str(exc),
-                        str(exc2),
-                    )
-                    return
-
             logger.warning(f"QQ pager keyboard send failed (interaction): {exc!s}")
             return
 
@@ -987,6 +989,13 @@ class QQOfficialWebhookPager:
         if not self.enabled_for(event):
             return
 
+        if not self._markdown_template_id:
+            return
+
+        placeholder_url = await self._get_placeholder_image_url()
+        if not placeholder_url:
+            return
+
         self._maybe_hook_interactions(event)
 
         bot = getattr(event, "bot", None)
@@ -1002,26 +1011,14 @@ class QQOfficialWebhookPager:
 
         source = getattr(event.message_obj, "raw_message", None)
 
-        def build_template_markdown() -> dict:
-            return {
-                "custom_template_id": self._markdown_template_id,
-                "params": [
-                    {"key": "title", "values": [str(title).strip() or "提示"]},
-                    {"key": "kind", "values": ["-"]},
-                    {"key": "page", "values": ["-"]},
-                    {"key": "hint", "values": [str(content).strip() or ""]},
-                ],
-            }
-
-        def build_plain_markdown() -> dict:
-            return {
-                "content": f"# {str(title).strip() or '提示'}\n\n{str(content).strip()}"
-            }
-
-        markdown: dict = (
-            build_template_markdown()
-            if self._markdown_template_id
-            else build_plain_markdown()
+        markdown: dict = self._template_markdown(
+            title=str(title).strip() or "提示",
+            kind="-",
+            page="-",
+            hint=str(content).strip() or " ",
+            image_url=placeholder_url,
+            image_width=1,
+            image_height=1,
         )
 
         msg_id = reply_to_msg_id or getattr(event.message_obj, "message_id", None)
@@ -1080,20 +1077,6 @@ class QQOfficialWebhookPager:
             await bot.api._http.request(route, json=payload)
             return
         except Exception as exc:
-            if self._markdown_template_id:
-                try:
-                    payload_fallback = dict(payload)
-                    payload_fallback["markdown"] = build_plain_markdown()
-                    await bot.api._http.request(route, json=payload_fallback)
-                    return
-                except Exception as exc2:
-                    logger.warning(
-                        "QQ markdown notice send failed: %s; fallback failed: %s",
-                        str(exc),
-                        str(exc2),
-                    )
-                    return
-
             logger.warning(f"QQ markdown notice send failed: {exc!s}")
             return
 
@@ -1153,26 +1136,21 @@ class QQOfficialWebhookPager:
         except Exception:
             return
 
-        def build_template_markdown() -> dict:
-            return {
-                "custom_template_id": self._markdown_template_id,
-                "params": [
-                    {"key": "title", "values": [str(title).strip() or "提示"]},
-                    {"key": "kind", "values": ["-"]},
-                    {"key": "page", "values": ["-"]},
-                    {"key": "hint", "values": [str(content).strip() or ""]},
-                ],
-            }
+        if not self._markdown_template_id:
+            return
 
-        def build_plain_markdown() -> dict:
-            return {
-                "content": f"# {str(title).strip() or '提示'}\n\n{str(content).strip()}"
-            }
+        placeholder_url = await self._get_placeholder_image_url()
+        if not placeholder_url:
+            return
 
-        markdown: dict = (
-            build_template_markdown()
-            if self._markdown_template_id
-            else build_plain_markdown()
+        markdown: dict = self._template_markdown(
+            title=str(title).strip() or "提示",
+            kind="-",
+            page="-",
+            hint=str(content).strip() or " ",
+            image_url=placeholder_url,
+            image_width=1,
+            image_height=1,
         )
 
         msg_id = reply_to_msg_id
@@ -1219,19 +1197,5 @@ class QQOfficialWebhookPager:
             await bot.api._http.request(route, json=payload)  # type: ignore[attr-defined]
             return
         except Exception as exc:
-            if self._markdown_template_id:
-                try:
-                    payload_fallback = dict(payload)
-                    payload_fallback["markdown"] = build_plain_markdown()
-                    await bot.api._http.request(route, json=payload_fallback)  # type: ignore[attr-defined]
-                    return
-                except Exception as exc2:
-                    logger.warning(
-                        "QQ markdown notice send failed (interaction): %s; fallback failed: %s",
-                        str(exc),
-                        str(exc2),
-                    )
-                    return
-
             logger.warning(f"QQ markdown notice send failed (interaction): {exc!s}")
             return
