@@ -11,7 +11,7 @@ async def handle_wm_pick_number(
     *, event: AstrMessageEvent, wm_pick_cache: EventScopedTTLCache
 ):
     try:
-        event.should_call_llm(False)
+        event.should_call_llm(True)
     except Exception as exc:
         logger.debug(f"Failed to disable LLM for wm_pick: {exc!s}")
 

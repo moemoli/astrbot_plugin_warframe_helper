@@ -42,7 +42,7 @@ class QQWebhookConfig:
 
 def _safe_disable_llm(event: AstrMessageEvent, *, reason: str) -> None:
     try:
-        event.should_call_llm(False)
+        event.should_call_llm(True)
     except Exception as exc:
         logger.debug(f"Failed to disable LLM for {reason}: {exc!s}")
 

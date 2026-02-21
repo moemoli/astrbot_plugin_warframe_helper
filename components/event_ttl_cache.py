@@ -87,8 +87,6 @@ class EventScopedTTLCache:
         if not key:
             return None
 
-        self._cleanup()
-
         rec = self._data.get(str(key))
         if not isinstance(rec, dict):
             return None
