@@ -342,8 +342,7 @@ class QQOfficialWebhookPager:
             else build_plain_markdown()
         )
 
-        resolved = getattr(getattr(interaction, "data", None), "resolved", None)
-        msg_id = reply_to_msg_id or getattr(resolved, "message_id", None)
+        msg_id = reply_to_msg_id
 
         # Do not send proactive messages for paging interactions.
         if not msg_id:
@@ -633,8 +632,7 @@ class QQOfficialWebhookPager:
             else build_plain_markdown()
         )
 
-        resolved = getattr(getattr(interaction, "data", None), "resolved", None)
-        msg_id = reply_to_msg_id or getattr(resolved, "message_id", None)
+        msg_id = reply_to_msg_id
 
         # Do not send proactive messages for paging interactions.
         if not msg_id:
@@ -899,8 +897,7 @@ class QQOfficialWebhookPager:
             else build_plain_markdown()
         )
 
-        resolved = getattr(getattr(interaction, "data", None), "resolved", None)
-        msg_id = reply_to_msg_id or getattr(resolved, "message_id", None)
+        msg_id = reply_to_msg_id
 
         # Do not send proactive messages for paging interactions.
         if not msg_id:

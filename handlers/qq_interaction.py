@@ -83,7 +83,6 @@ async def handle_qq_interaction_create(
         channel_id = getattr(interaction, "channel_id", None)
         group_member_openid = getattr(interaction, "group_member_openid", None)
         resolved_user_id = getattr(resolved, "user_id", None)
-        resolved_message_id = getattr(resolved, "message_id", None)
 
         if group_openid:
             session_id = str(group_openid)
@@ -107,15 +106,6 @@ async def handle_qq_interaction_create(
                 pass
         else:
             return
-
-        if resolved_message_id:
-            try:
-                platform.remember_session_message_id(
-                    session_id, str(resolved_message_id)
-                )
-            except Exception:
-                pass
-            reply_to_msg_id = str(resolved_message_id)
     except Exception:
         return
 
