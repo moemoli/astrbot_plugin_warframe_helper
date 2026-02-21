@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from astrbot.api import logger
@@ -180,6 +180,27 @@ class SortieInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class ArchonHuntStage:
+    node: str
+    mission_type: str
+    modifier: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ArchonHuntInfo:
+    boss: str | None
+    faction: str | None
+    eta: str
+    stages: tuple[ArchonHuntStage, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SteelPathRewardInfo:
+    reward: str | None
+    eta: str
+
+
+@dataclass(frozen=True, slots=True)
 class SyndicateJob:
     node: str | None
     mission_type: str | None
@@ -291,6 +312,14 @@ class DuviriCycleInfo:
     end_time: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class DuviriCircuitRewardInfo:
+    normal_choices: tuple[str, ...]
+    steel_choices: tuple[str, ...]
+    eta: str
+    expiry_utc: datetime | None
+
+
 class WarframeWorldstateClient:
     def __init__(
         self, *, http_timeout_sec: float = 10.0, cache_ttl_sec: float = 30.0
@@ -364,6 +393,7 @@ class WarframeWorldstateClient:
             "MT_ASSASSINATION": "刺杀",
             "MT_SPY": "间谍",
             "MT_EXCAVATE": "挖掘",
+            "MT_DISRUPTION": "中断",
             "MT_ALCHEMY": "炼金",
             "MT_VOID_CASCADE": "虚空瀑流",
             "MT_CORRUPTION": "腐化",
@@ -586,6 +616,97 @@ class WarframeWorldstateClient:
             eta=_format_eta_from_dt(expiry),
             stages=tuple(stages),
         )
+
+    async def fetch_archon_hunt(
+        self, *, platform: Platform = "pc", language: str = "zh"
+    ) -> ArchonHuntInfo | None:
+        ws = await self._get_worldstate(platform=platform, language=language)
+        if not isinstance(ws, dict):
+            return None
+
+        ah = ws.get("ArchonHunt")
+        if not isinstance(ah, dict):
+            return None
+
+        expiry = _parse_ws_date(ah.get("Expiry"))
+
+        boss_raw = ah.get("Boss") if isinstance(ah.get("Boss"), str) else None
+        boss = (
+            boss_raw.replace("ArchonHuntBoss_", "").replace("ARCHON_HUNT_BOSS_", "")
+            if boss_raw
+            else None
+        )
+        faction = ah.get("Faction") if isinstance(ah.get("Faction"), str) else None
+
+        stages: list[ArchonHuntStage] = []
+        missions = ah.get("Missions")
+        if isinstance(missions, list):
+            for m in missions:
+                if not isinstance(m, dict):
+                    continue
+                node_u = m.get("node") if isinstance(m.get("node"), str) else ""
+                node = await self._node_name(node_u, language=language)
+                mt = self._mission_type_cn(
+                    m.get("missionType") if isinstance(m.get("missionType"), str) else ""
+                )
+                mod_raw = m.get("modifierType")
+                modifier = (
+                    mod_raw.replace("SORTIE_MODIFIER_", "")
+                    if isinstance(mod_raw, str)
+                    else None
+                )
+                stages.append(
+                    ArchonHuntStage(node=node, mission_type=mt, modifier=modifier)
+                )
+
+        return ArchonHuntInfo(
+            boss=boss,
+            faction=faction,
+            eta=_format_eta_from_dt(expiry),
+            stages=tuple(stages),
+        )
+
+    async def fetch_steel_path_reward(
+        self, *, platform: Platform = "pc", language: str = "zh"
+    ) -> SteelPathRewardInfo | None:
+        """Fetch current Steel Path reward rotation (Teshin / Steel Path Honors).
+
+        Worldstate schema differs across sources; this method is best-effort.
+        """
+
+        ws = await self._get_worldstate(platform=platform, language=language)
+        if not isinstance(ws, dict):
+            return None
+
+        sp = ws.get("SteelPath")
+        if not isinstance(sp, dict):
+            return None
+
+        # Try multiple known shapes.
+        reward_name: str | None = None
+        reward_raw = sp.get("CurrentReward")
+        if isinstance(reward_raw, str):
+            reward_name = reward_raw
+        elif isinstance(reward_raw, dict):
+            # Possible keys: ItemType / item / name / uniqueName
+            for k in ("ItemType", "item", "name", "uniqueName"):
+                v = reward_raw.get(k)
+                if isinstance(v, str) and v.strip():
+                    reward_name = v.strip()
+                    break
+
+        # Translate uniqueName if possible.
+        if reward_name and reward_name.startswith("/"):
+            translated = await self._item_name(reward_name, language=language)
+            reward_name = translated or reward_name
+
+        expiry = (
+            _parse_ws_date(sp.get("Expiry"))
+            or _parse_ws_date(sp.get("expiry"))
+            or _parse_ws_date(sp.get("EndDate"))
+        )
+
+        return SteelPathRewardInfo(reward=reward_name, eta=_format_eta_from_dt(expiry))
 
     async def fetch_syndicates(
         self, *, platform: Platform = "pc", language: str = "zh"
@@ -990,4 +1111,57 @@ class WarframeWorldstateClient:
             eta=_format_time_left(left_sec),
             start_time=_format_dt_local(start_dt),
             end_time=_format_dt_local(end_dt),
+        )
+
+    async def fetch_duviri_circuit_rewards(
+        self, *, platform: Platform = "pc", language: str = "zh"
+    ) -> DuviriCircuitRewardInfo | None:
+        """查询双衍王境「轮回」奖励轮换（普通/钢铁）。
+
+        官方 worldstate 中用 `EndlessXpChoices` 承载：
+        - EXC_NORMAL：普通轮回（通常为战甲）
+        - EXC_HARD：钢铁轮回（通常为武器/始源适配器相关）
+
+        该字段不提供到期时间，这里按“下一个周一 00:00 UTC”作为轮换重置时间做近似。
+        """
+
+        ws = await self._get_worldstate(platform=platform, language=language)
+        if not isinstance(ws, dict):
+            return None
+
+        server_sec = ws.get("Time")
+        if not isinstance(server_sec, int):
+            server_sec = int(time.time())
+        server_dt = datetime.fromtimestamp(server_sec, tz=timezone.utc)
+
+        normal: list[str] = []
+        steel: list[str] = []
+
+        rows = ws.get("EndlessXpChoices")
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                cat = row.get("Category") if isinstance(row.get("Category"), str) else ""
+                arr = row.get("Choices")
+                if not isinstance(arr, list):
+                    continue
+                picked = [str(x).strip() for x in arr if isinstance(x, str) and str(x).strip()]
+                if not picked:
+                    continue
+                if cat == "EXC_NORMAL":
+                    normal = picked
+                elif cat == "EXC_HARD":
+                    steel = picked
+
+        # Next Monday 00:00 UTC
+        day_start = server_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        monday_start = day_start - timedelta(days=int(server_dt.weekday()))
+        next_reset = monday_start + timedelta(days=7)
+
+        return DuviriCircuitRewardInfo(
+            normal_choices=tuple(normal),
+            steel_choices=tuple(steel),
+            eta=_format_eta_from_dt(next_reset),
+            expiry_utc=next_reset,
         )

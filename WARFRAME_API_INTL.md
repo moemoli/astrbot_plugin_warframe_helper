@@ -8,69 +8,7 @@
 
 ---
 
-## 1) 世界状态 / 事件（推荐：WarframeStat.us）
-
-### 1.1 WarframeStat.us（非官方聚合，推荐用于 Bot 查询）
-
-- Base URL：`https://api.warframestat.us`
-- 文档：`https://docs.warframestat.us/`
-- 平台路径：`/pc`、`/ps4`、`/xb1`、`/swi`（按文档为准）
-- 返回：JSON（多数时间字段为 ISO 8601 字符串）
-
-#### 语言参数（重要）
-
-- `language` 查询参数在文档中被标注为 required（必传）。
-- 建议：**总是显式传** `language=zh`（或你需要的语言），避免缓存导致返回语言不一致。
-
-#### 常用端点（以 PC 为例）
-
-- 世界状态总览
-  - `GET /pc?language=zh`
-- 警报
-  - `GET /pc/alerts?language=zh`
-- 裂缝
-  - `GET /pc/fissures?language=zh`
-- 奸商（虚空商人 Baro Ki'Teer）
-  - `GET /pc/voidTrader?language=zh`
-- 仲裁
-  - `GET /pc/arbitration?language=zh`
-- 突击
-  - `GET /pc/sortie?language=zh`
-- 夜波
-  - `GET /pc/nightwave?language=zh`
-- 入侵
-  - `GET /pc/invasions?language=zh`
-- 平原/开放世界循环（常用于“现在白天/黑夜、轮换剩余时间”）
-  - `GET /pc/earthCycle?language=zh`
-  - `GET /pc/cetusCycle?language=zh`
-  - `GET /pc/cambionCycle?language=zh`
-
-> 备注：部分端点可能偶发不可用（例如曾观察到 `GET /pc/fissures` 返回 523）。建议对“世界状态类”接口做 30–60 秒缓存，并在失败时回退到“总览 /pc”。
-
-#### 示例（PowerShell）
-
-```powershell
-# 警报（中文）
-Invoke-RestMethod 'https://api.warframestat.us/pc/alerts?language=zh'
-
-# 裂缝（中文）
-Invoke-RestMethod 'https://api.warframestat.us/pc/fissures?language=zh'
-
-# 奸商（中文）
-Invoke-RestMethod 'https://api.warframestat.us/pc/voidTrader?language=zh'
-```
-
-#### 示例（最小字段提取）
-
-```powershell
-# 只看裂缝的 node / tier / expiry
-Invoke-RestMethod 'https://api.warframestat.us/pc/fissures?language=zh' |
-  Select-Object node tier expiry
-```
-
----
-
-## 2) 世界状态（官方源：api.warframe.com）
+## 1) 世界状态（官方源：api.warframe.com）
 
 ### 2.1 官方 WorldState（PC）
 
@@ -142,3 +80,55 @@ Invoke-RestMethod 'https://content.warframe.com/dynamic/worldState.php'
 - **世界状态类**：默认使用 WarframeStat.us（支持 `language=zh`，字段对 Bot 更友好）
 - **权威兜底**：需要时再访问官方 `worldState.php`（注意体积与缓存）
 - **交易类**：优先 warframe.market；若目标环境经常被拦截，考虑增加缓存与失败提示（“当前网络无法访问 warframe.market API”）
+
+---
+
+## 5) 静态数据/词典（官方源：PublicExport）
+
+> 适合查询“物品/战甲/MOD/武器”等静态数据。优点是权威、字段丰富、可缓存；缺点是单次导出文件可能较大。
+
+- Base URL：`https://content.warframe.com/PublicExport`
+- 获取索引：`/index_{lang}.txt.lzma`
+- 获取导出：`/Manifest/{filename}!{token}`
+
+### 常用导出（文件名随语言变化）
+
+- `ExportWeapons_{lang}.json`：武器
+- `ExportWarframes_{lang}.json`：战甲
+- `ExportUpgrades_{lang}.json`：MOD/升级（包含多种 upgrade 条目，需按字段做容错筛选）
+
+### 本插件已接入的指令（基于 PublicExport）
+
+- `/武器 <名称>`
+- `/战甲 <名称>`
+- `/MOD <名称>`
+
+---
+
+## 6) 掉落表/遗物奖池（WFCD：warframe-drop-data）
+
+> 说明：该数据源以“可直接下载的 JSON 文件”为主，适合做掉落检索与遗物奖池展示。
+>
+> 可达性提示：在部分网络环境中，`drops.warframestat.us` 可能出现 403；因此插件侧建议优先使用 GitHub Raw / CDN 镜像并做缓存。
+
+### 6.1 all.slim.json（用于掉落检索）
+
+- 文件：`data/all.slim.json`
+- 典型字段：`item` / `place` / `rarity` / `chance`
+- 适用指令：`/掉落 <物品>`（按 item 关键词匹配，返回 place + 概率）
+- 插件增强：支持输入中文物品名（基于 PublicExport 做中英名称对齐，best-effort）
+
+### 6.2 relics.json + 单遗物明细（用于遗物奖池）
+
+- 索引：`data/relics.json`
+  - 常见结构：`{"relics": [ {"tier":"Axi","relicName":"A1",...} ] }`
+  - 用途：当用户只输入 `A1` 时，用索引反查可能的纪元（tier）
+
+- 单遗物：`data/relics/$TIER/$RELIC_NAME.json`
+  - 常见结构：`{"tier":"Axi","relicName":"A1","rewards": {"Intact":[...],"Exceptional":[...],"Flawless":[...],"Radiant":[...]}}`
+  - 适用指令：`/遗物 <纪元> <遗物名>`
+
+### 6.3 推荐的插件侧接入策略
+
+- 多 URL 兜底：GitHub Raw + jsDelivr（以及必要时的备用分支路径）
+- 本地磁盘缓存：减少大 JSON（尤其 `all.slim.json`）重复下载

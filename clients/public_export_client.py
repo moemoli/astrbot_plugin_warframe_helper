@@ -14,7 +14,6 @@ from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 from ..http_utils import fetch_bytes, fetch_json
 
-
 PUBLIC_EXPORT_BASE = "https://content.warframe.com/PublicExport"
 
 
@@ -83,6 +82,8 @@ class PublicExportClient:
         self._mem_unique_name_maps: dict[str, dict[str, str]] = {}
         self._mem_region_maps: dict[str, dict[str, str]] = {}
         self._mem_nightwave_map: dict[str, dict[str, tuple[str, int | None]]] = {}
+        # localized slug -> [english names]
+        self._mem_localized_to_en: dict[str, dict[str, list[str]]] = {}
 
     def _base_dir(self) -> Path:
         base = Path(get_astrbot_plugin_data_path())
@@ -153,7 +154,9 @@ class PublicExportClient:
             if filename and token:
                 file_tokens[filename] = token
 
-        idx = PublicExportIndex(language=lang, fetched_at=time.time(), file_tokens=file_tokens)
+        idx = PublicExportIndex(
+            language=lang, fetched_at=time.time(), file_tokens=file_tokens
+        )
         self._mem_index[lang] = idx
 
         try:
@@ -275,20 +278,29 @@ class PublicExportClient:
                         continue
                     uniq = row.get("uniqueName")
                     name = row.get("name")
-                    if isinstance(uniq, str) and isinstance(name, str) and uniq and name:
+                    if (
+                        isinstance(uniq, str)
+                        and isinstance(name, str)
+                        and uniq
+                        and name
+                    ):
                         out.setdefault(uniq, name)
 
         self._mem_unique_name_maps[lang] = out
         return out
 
-    async def translate_unique_name(self, unique_name: str, *, language: str = "zh") -> str | None:
+    async def translate_unique_name(
+        self, unique_name: str, *, language: str = "zh"
+    ) -> str | None:
         unique_name = (unique_name or "").strip()
         if not unique_name:
             return None
         mapping = await self.get_unique_name_map(language=language)
         return mapping.get(unique_name)
 
-    async def translate_region(self, node_unique: str, *, language: str = "zh") -> str | None:
+    async def translate_region(
+        self, node_unique: str, *, language: str = "zh"
+    ) -> str | None:
         node_unique = (node_unique or "").strip()
         if not node_unique:
             return None
@@ -303,7 +315,9 @@ class PublicExportClient:
         if cached is not None:
             return cached
 
-        data = await self.fetch_export(f"ExportSortieRewards_{lang}.json", language=lang)
+        data = await self.fetch_export(
+            f"ExportSortieRewards_{lang}.json", language=lang
+        )
         out: dict[str, tuple[str, int | None]] = {}
         if isinstance(data, dict):
             nw = data.get("ExportNightwave")
@@ -318,7 +332,10 @@ class PublicExportClient:
                         standing = c.get("standing")
                         if not isinstance(uniq, str) or not isinstance(name, str):
                             continue
-                        out[uniq] = (name, standing if isinstance(standing, int) else None)
+                        out[uniq] = (
+                            name,
+                            standing if isinstance(standing, int) else None,
+                        )
 
         self._mem_nightwave_map[lang] = out
         return out
@@ -330,45 +347,182 @@ class PublicExportClient:
         language: str = "zh",
         limit: int = 5,
     ) -> list[dict[str, Any]]:
+        return await self._search_export_list(
+            export_filename=f"ExportWeapons_{(language or 'zh').strip().lower() or 'zh'}.json",
+            list_key="ExportWeapons",
+            query=query,
+            language=language,
+            limit=limit,
+        )
+
+    async def _search_export_list(
+        self,
+        *,
+        export_filename: str,
+        list_key: str,
+        query: str,
+        language: str = "zh",
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
         lang = (language or "zh").strip().lower() or "zh"
         q = _normalize_query(query)
         if not q:
             return []
 
-        data = await self.fetch_export(f"ExportWeapons_{lang}.json", language=lang)
-        weapons = data.get("ExportWeapons") if isinstance(data, dict) else None
-        if not isinstance(weapons, list):
+        data = await self.fetch_export(export_filename, language=lang)
+        rows = data.get(list_key) if isinstance(data, dict) else None
+        if not isinstance(rows, list):
             return []
 
         q_slug = _slug(q)
 
         scored: list[tuple[int, dict[str, Any]]] = []
-        for w in weapons:
-            if not isinstance(w, dict):
+        for row in rows:
+            if not isinstance(row, dict):
                 continue
-            name = w.get("name")
-            uniq = w.get("uniqueName")
+            name = row.get("name")
+            uniq = row.get("uniqueName")
             if not isinstance(name, str) or not name:
                 continue
 
             name_n = _normalize_query(name)
             name_slug = _slug(name)
             uniq_s = uniq if isinstance(uniq, str) else ""
+
             score = 0
             if q_slug and name_slug == q_slug:
                 score = 0
             elif q and name_n == q:
                 score = 1
-            elif q_slug and q_slug and q_slug in name_slug:
+            elif q_slug and q_slug in name_slug:
                 score = 5
             elif q and q in name_n:
                 score = 8
-            elif q_slug and q_slug and q_slug in _slug(uniq_s):
+            elif q_slug and q_slug in _slug(uniq_s):
                 score = 12
             else:
                 continue
 
-            scored.append((score, w))
+            scored.append((score, row))
 
         scored.sort(key=lambda x: x[0])
-        return [w for _, w in scored[: max(1, min(int(limit), 20))]]
+        return [r for _, r in scored[: max(1, min(int(limit), 20))]]
+
+    async def search_warframe(
+        self,
+        query: str,
+        *,
+        language: str = "zh",
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        lang = (language or "zh").strip().lower() or "zh"
+        return await self._search_export_list(
+            export_filename=f"ExportWarframes_{lang}.json",
+            list_key="ExportWarframes",
+            query=query,
+            language=lang,
+            limit=limit,
+        )
+
+    async def search_mod(
+        self,
+        query: str,
+        *,
+        language: str = "zh",
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        lang = (language or "zh").strip().lower() or "zh"
+        # ExportUpgrades contains mods and other upgrade items; we do best-effort filtering.
+        rows = await self._search_export_list(
+            export_filename=f"ExportUpgrades_{lang}.json",
+            list_key="ExportUpgrades",
+            query=query,
+            language=lang,
+            limit=max(1, min(int(limit), 20)),
+        )
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            # Heuristic: Mods usually have 'fusionLimit' or 'modType' fields.
+            if not isinstance(r, dict):
+                continue
+            if any(k in r for k in ["fusionLimit", "modType", "polarity", "rarity"]):
+                out.append(r)
+            else:
+                out.append(r)
+        return out
+
+    async def _get_localized_to_en_map(self, *, language: str) -> dict[str, list[str]]:
+        lang = (language or "zh").strip().lower() or "zh"
+        cached = self._mem_localized_to_en.get(lang)
+        if cached is not None:
+            return cached
+
+        # Build mapping via uniqueName intersection.
+        local_map = await self.get_unique_name_map(language=lang)
+        en_map = await self.get_unique_name_map(language="en")
+
+        out: dict[str, list[str]] = {}
+        for uniq, local_name in local_map.items():
+            en_name = en_map.get(uniq)
+            if not isinstance(en_name, str) or not en_name.strip():
+                continue
+            if not isinstance(local_name, str) or not local_name.strip():
+                continue
+            k = _slug(local_name)
+            if not k:
+                continue
+            arr = out.setdefault(k, [])
+            if en_name not in arr:
+                arr.append(en_name)
+
+        self._mem_localized_to_en[lang] = out
+        return out
+
+    async def resolve_localized_to_english_candidates(
+        self,
+        query: str,
+        *,
+        language: str = "zh",
+        limit: int = 5,
+    ) -> list[str]:
+        """Resolve a localized item name (e.g. Chinese) to possible English names.
+
+        This is a best-effort helper for data sources that primarily use English
+        names (e.g. drop-data). It uses PublicExport uniqueName to align names
+        across languages.
+        """
+
+        q = _slug(query)
+        if not q:
+            return []
+
+        mapping = await self._get_localized_to_en_map(language=language)
+
+        # Exact match first.
+        exact = mapping.get(q)
+        if exact:
+            return exact[: max(1, min(int(limit), 10))]
+
+        # Substring match fallback.
+        scored: list[tuple[int, str]] = []
+        for k, names in mapping.items():
+            if q not in k:
+                continue
+            # Prefer prefix and shorter distance.
+            score = 0
+            if k.startswith(q):
+                score += 50
+            score -= abs(len(k) - len(q))
+            for n in names:
+                if isinstance(n, str) and n.strip():
+                    scored.append((score, n.strip()))
+
+        scored.sort(key=lambda x: (-int(x[0]), x[1]))
+        out: list[str] = []
+        for _, name in scored:
+            if name in out:
+                continue
+            out.append(name)
+            if len(out) >= max(1, min(int(limit), 10)):
+                break
+        return out

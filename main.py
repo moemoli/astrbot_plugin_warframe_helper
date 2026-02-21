@@ -1,15 +1,16 @@
+import asyncio
 import json
-import random
 import re
 import time
 from typing import cast
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Reply
 from astrbot.api.star import Context, Star, register
 from astrbot.core.star.filter.command import GreedyStr
 
+from .clients.drop_data_client import DropDataClient
 from .clients.market_client import WarframeMarketClient
 from .clients.public_export_client import PublicExportClient
 from .clients.worldstate_client import Platform, WarframeWorldstateClient
@@ -23,8 +24,6 @@ from .constants import (
     WORLDSTATE_PLATFORM_ALIASES,
 )
 from .helpers import (
-    eta_key_zh,
-    parse_platform,
     presence_rank,
     split_tokens,
     uniq_lower,
@@ -39,6 +38,15 @@ from .renderers.worldstate_render import (
     WorldstateRow,
     render_worldstate_rows_image_to_file,
 )
+
+from .components.event_ttl_cache import EventScopedTTLCache
+from .components.qq_official_webhook import QQOfficialWebhookPager
+from .services import drop_data_commands, public_export_commands, worldstate_commands
+from .services.fissures import render_fissures_image, render_fissures_text
+from .services.subscriptions import SubscriptionService
+from .services.worldstate_views import render_worldstate_cycle
+from .utils.platforms import eta_key, worldstate_platform_from_tokens
+from .utils.text import normalize_compact, safe_relic_name
 
 
 @register("warframe_helper", "moemoli", "Warframe 助手", "v0.0.1")
@@ -60,325 +68,31 @@ class WarframeHelperPlugin(Star):
         self.market_client = WarframeMarketClient()
         self.worldstate_client = WarframeWorldstateClient()
         self.public_export_client = PublicExportClient()
+        self.drop_data_client = DropDataClient()
 
         # 最近一次 /wm 的 TopN 结果缓存（用于“回复图片发数字”快速生成 /w 话术）
-        # key = unified_origin + sender_id
-        self._wm_pick_cache: dict[str, dict] = {}
-        self._wm_pick_cache_ttl_sec: float = 8 * 60
+        self._wm_pick_cache = EventScopedTTLCache(ttl_sec=8 * 60)
 
         # /wm, /wmr pagination cache for QQ official webhook button paging.
-        # key = unified_origin + sender_id
-        self._pager_cache: dict[str, dict] = {}
-        self._pager_cache_ttl_sec: float = 10 * 60
+        self._pager_cache = EventScopedTTLCache(ttl_sec=10 * 60)
 
         # QQ official webhook keyboard template id (message buttons).
         # Note: QQ button templates do NOT support variables.
-        self._qq_official_webhook_pager_keyboard_template_id: str = (
-            str(
-                (self.config.get("qq_official_webhook_pager_keyboard_template_id") if self.config else "")
-                or ""
-            ).strip()
-        )
-
-    def _wm_cache_key(self, event: AstrMessageEvent) -> str:
-        return f"{event.unified_msg_origin}|{event.get_sender_id()}"
-
-    def _pager_cache_key(self, event: AstrMessageEvent) -> str:
-        return f"{event.unified_msg_origin}|{event.get_sender_id()}"
-
-    def _pager_put_cache(self, *, event: AstrMessageEvent, state: dict) -> None:
-        try:
-            state = dict(state or {})
-            state["ts"] = time.time()
-            self._pager_cache[self._pager_cache_key(event)] = state
-        except Exception:
-            return
-
-    def _pager_get_cache(self, event: AstrMessageEvent) -> dict | None:
-        rec = self._pager_cache.get(self._pager_cache_key(event))
-        if not isinstance(rec, dict):
-            return None
-        ts = rec.get("ts")
-        if not isinstance(ts, (int, float)):
-            return None
-        if (time.time() - float(ts)) > self._pager_cache_ttl_sec:
-            return None
-        return rec
-
-    def _is_qq_official_webhook(self, event: AstrMessageEvent) -> bool:
-        try:
-            return event.get_platform_name() == "qq_official_webhook"
-        except Exception:
-            return False
-
-    async def _qq_official_webhook_send_pager_keyboard(
-        self,
-        event: AstrMessageEvent,
-        *,
-        kind: str,
-        page: int,
-    ) -> None:
-        """Send a markdown message with a keyboard template (buttons) on QQ official webhook.
-
-        This bypasses AstrBot's generic send path, so it does not affect other platforms.
-        """
-
-        if not self._is_qq_official_webhook(event):
-            return
-        template_id = self._qq_official_webhook_pager_keyboard_template_id
-        if not template_id:
-            return
-
-        bot = getattr(event, "bot", None)
-        if not bot or not getattr(bot, "api", None):
-            return
-
-        try:
-            import botpy
-            from botpy.http import Route
-        except Exception:
-            return
-
-        source = getattr(event.message_obj, "raw_message", None)
-
-        # Buttons require markdown content (cannot send keyboard-only).
-        markdown_text = f"翻页：{kind} 第{max(1, int(page))}页\n\n使用下方按钮上一页/下一页"
-        payload: dict = {
-            "msg_type": 2,
-            "markdown": {"content": markdown_text},
-            "keyboard": {"id": template_id},
-            "msg_id": getattr(event.message_obj, "message_id", None),
-        }
-
-        # For group/c2c replies, msg_seq is used to avoid duplicate send.
-        payload["msg_seq"] = random.randint(1, 10000)
-
-        route = None
-        try:
-            if isinstance(source, botpy.message.GroupMessage):
-                group_openid = getattr(source, "group_openid", None)
-                if not group_openid:
-                    return
-                route = Route(
-                    "POST",
-                    "/v2/groups/{group_openid}/messages",
-                    group_openid=group_openid,
-                )
-            elif isinstance(source, botpy.message.C2CMessage):
-                openid = getattr(getattr(source, "author", None), "user_openid", None)
-                if not openid:
-                    return
-                route = Route("POST", "/v2/users/{openid}/messages", openid=openid)
-            elif isinstance(source, botpy.message.Message):
-                channel_id = getattr(source, "channel_id", None)
-                if not channel_id:
-                    return
-                route = Route(
-                    "POST",
-                    "/channels/{channel_id}/messages",
-                    channel_id=channel_id,
-                )
-            elif isinstance(source, botpy.message.DirectMessage):
-                guild_id = getattr(source, "guild_id", None)
-                if not guild_id:
-                    return
-                route = Route("POST", "/dms/{guild_id}/messages", guild_id=guild_id)
-            else:
-                return
-
-            await bot.api._http.request(route, json=payload)
-        except Exception as exc:
-            logger.warning(f"QQ pager keyboard send failed: {exc!s}")
-            return
-
-    def _wm_put_pick_cache(
-        self,
-        *,
-        event: AstrMessageEvent,
-        item_name_en: str,
-        order_type: str,
-        platform: str,
-        rows,
-    ) -> None:
-        try:
-            self._wm_pick_cache[self._wm_cache_key(event)] = {
-                "ts": time.time(),
-                "item_name_en": item_name_en,
-                "order_type": order_type,
-                "platform": platform,
-                # rows: list[{"name": str, "platinum": int}]
-                "rows": rows,
-            }
-        except Exception:
-            return
-
-    def _wm_get_pick_cache(self, event: AstrMessageEvent) -> dict | None:
-        rec = self._wm_pick_cache.get(self._wm_cache_key(event))
-        if not isinstance(rec, dict):
-            return None
-        ts = rec.get("ts")
-        if not isinstance(ts, (int, float)):
-            return None
-        if (time.time() - float(ts)) > self._wm_pick_cache_ttl_sec:
-            return None
-        return rec
-
-    def _worldstate_platform_from_tokens(self, tokens: list[str]) -> Platform:
-        p = parse_platform(tokens, WORLDSTATE_PLATFORM_ALIASES, default="pc")
-        if p in {"pc", "ps4", "xb1", "swi"}:
-            return cast(Platform, p)
-        return "pc"
-
-    def _market_platform_from_tokens(self, tokens: list[str]) -> str:
-        return parse_platform(tokens, MARKET_PLATFORM_ALIASES, default="pc")
-
-    def _eta_key(self, s: str) -> int:
-        return eta_key_zh(s)
-
-    async def _render_worldstate_single_row(
-        self,
-        event: AstrMessageEvent,
-        *,
-        title: str,
-        platform_norm: str,
-        row_title: str,
-        row_right: str | None,
-        accent: tuple[int, int, int, int],
-        plain_text: str,
-    ):
-        rendered = await render_worldstate_rows_image_to_file(
-            title=title,
-            header_lines=[f"平台：{platform_norm}"],
-            rows=[WorldstateRow(title=row_title, right=row_right)],
-            accent=accent,
-        )
-        if rendered:
-            return event.image_result(rendered.path)
-        return event.plain_result(plain_text)
-
-    async def _render_worldstate_cycle(
-        self,
-        event: AstrMessageEvent,
-        *,
-        title: str,
-        platform_norm: str,
-        state_cn: str,
-        left: str,
-        start_time: str | None,
-        end_time: str | None,
-        accent: tuple[int, int, int, int],
-        plain_prefix: str,
-    ):
-        rows: list[WorldstateRow] = [
-            WorldstateRow(title=f"当前：{state_cn}", right=f"剩余{left}"),
-        ]
-        if start_time:
-            rows.append(WorldstateRow(title=f"开始：{start_time}"))
-        if end_time:
-            rows.append(WorldstateRow(title=f"结束：{end_time}"))
-
-        rendered = await render_worldstate_rows_image_to_file(
-            title=title,
-            header_lines=[f"平台：{platform_norm}"],
-            rows=rows,
-            accent=accent,
-        )
-        if rendered:
-            return event.image_result(rendered.path)
-
-        lines = [f"{plain_prefix}（{platform_norm}）当前：{state_cn} | 剩余{left}"]
-        if start_time:
-            lines.append(f"开始：{start_time}")
-        if end_time:
-            lines.append(f"结束：{end_time}")
-        return event.plain_result("\n".join(lines))
-
-    async def _render_fissures_text(
-        self, *, platform_norm: Platform, fissure_kind: str
-    ) -> str:
-        fissures = await self.worldstate_client.fetch_fissures(
-            platform=platform_norm, language="zh"
-        )
-        if fissures is None:
-            return "未获取到裂缝信息（可能是网络限制或接口不可达）。"
-        if not fissures:
-            return f"当前无裂缝（{platform_norm}）。"
-
-        def pick(f):
-            if fissure_kind == "九重天":
-                return f.is_storm
-            if fissure_kind == "钢铁":
-                return f.is_hard
-            return (not f.is_storm) and (not f.is_hard)
-
-        picked = [f for f in fissures if pick(f)]
-        if not picked:
-            return f"当前无{fissure_kind}裂缝（{platform_norm}）。"
-
-        picked.sort(key=lambda x: self._eta_key(x.eta))
-
-        lines: list[str] = [
-            f"裂缝（{platform_norm}）{fissure_kind} 共{len(picked)}条："
-        ]
-        for f in picked:
-            enemy = f" | {f.enemy}" if f.enemy else ""
-            lines.append(f"- {f.tier} {f.mission_type} - {f.node} | 剩余{f.eta}{enemy}")
-        return "\n".join(lines)
-
-    async def _render_fissures_image(
-        self, *, platform_norm: Platform, fissure_kind: str
-    ):
-        fissures = await self.worldstate_client.fetch_fissures(
-            platform=platform_norm, language="zh"
-        )
-        if fissures is None:
-            return None
-        if not fissures:
-            return None
-
-        def pick(f):
-            if fissure_kind == "九重天":
-                return f.is_storm
-            if fissure_kind == "钢铁":
-                return f.is_hard
-            return (not f.is_storm) and (not f.is_hard)
-
-        picked = [f for f in fissures if pick(f)]
-        if not picked:
-            return None
-
-        picked.sort(key=lambda x: self._eta_key(x.eta))
-
-        def row_accent(f):
-            if f.is_hard:
-                return (100, 116, 139, 255)
-            if f.is_storm:
-                return (14, 165, 233, 255)
-            return (139, 92, 246, 255)
-
-        rows: list[WorldstateRow] = []
-        for f in picked[:18]:
-            enemy = f" | {f.enemy}" if f.enemy else ""
-            tag = "钢铁" if f.is_hard else ("九重天" if f.is_storm else "普通")
-            rows.append(
-                WorldstateRow(
-                    title=f"{f.tier} {f.mission_type}",
-                    subtitle=f"{f.node}{enemy}",
-                    right=f"剩余{f.eta}",
-                    tag=tag,
-                    accent=row_accent(f),
-                )
+        qq_tpl = str(
+            (
+                self.config.get("qq_official_webhook_pager_keyboard_template_id")
+                if self.config
+                else ""
             )
+            or ""
+        ).strip()
+        self._qq_pager = QQOfficialWebhookPager(keyboard_template_id=qq_tpl)
 
-        return await render_worldstate_rows_image_to_file(
-            title="裂缝",
-            header_lines=[
-                f"平台：{platform_norm}",
-                f"筛选：{fissure_kind}",
-                f"共{len(picked)}条（展示前{min(18, len(picked))}条）",
-            ],
-            rows=rows,
-            accent=(139, 92, 246, 255),
+        # Fissure subscription (proactive notifications)
+        self._subscriptions = SubscriptionService(
+            context=self.context,
+            worldstate_client=self.worldstate_client,
+            config=self.config,
         )
 
     async def initialize(self):
@@ -386,6 +100,164 @@ class WarframeHelperPlugin(Star):
         await self.term_mapper.initialize()
         await self.riven_weapon_mapper.initialize()
         await self.riven_stat_mapper.initialize()
+
+        # Start subscription polling loop after the event loop is ready.
+        self._subscriptions.start()
+
+    async def terminate(self):
+        """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
+        await self._subscriptions.stop()
+
+    @filter.command("订阅")
+    async def wf_subscribe(
+        self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()
+    ):
+        """订阅提醒。
+
+        - 裂缝：/订阅 钢铁赛中 [次数|永久]
+        - 平原：/订阅 夜灵平原 黑夜 [次数|永久]
+        """
+
+        event.should_call_llm(False)
+
+        raw_args = str(args)
+        msg, chain = await self._subscriptions.subscribe(event=event, raw_args=raw_args)
+        if chain is not None:
+            yield event.chain_result(chain.chain)
+            return
+        if msg:
+            yield event.plain_result(msg)
+            return
+
+    @filter.command("退订", alias={"取消订阅"})
+    async def wf_unsubscribe(
+        self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()
+    ):
+        """退订提醒。
+
+        - 裂缝：/退订 钢铁赛中
+        - 平原：/退订 夜灵平原 黑夜
+        """
+
+        event.should_call_llm(False)
+
+        msg = await self._subscriptions.unsubscribe(event=event, raw_args=str(args))
+        yield event.plain_result(msg)
+
+    @filter.command("订阅列表")
+    async def wf_subscribe_list(self, event: AstrMessageEvent):
+        """查看当前会话的订阅列表。"""
+
+        event.should_call_llm(False)
+        chain = await self._subscriptions.render_list(event=event)
+        yield event.chain_result(chain.chain)
+
+    @filter.command("执行官猎杀", alias={"archon", "执行官"})
+    async def wf_archon_hunt(
+        self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()
+    ):
+        """查询执行官猎杀（Archon Hunt）。"""
+
+        event.should_call_llm(False)
+        tokens = split_tokens(str(args))
+        platform_norm = worldstate_platform_from_tokens(tokens)
+
+        info = await self.worldstate_client.fetch_archon_hunt(
+            platform=platform_norm, language="zh"
+        )
+        if not info:
+            yield event.plain_result(
+                "未获取到执行官猎杀信息（可能是网络限制或接口不可达）。"
+            )
+            return
+
+        header_lines: list[str] = [f"平台：{platform_norm}"]
+        if info.boss:
+            header_lines.append(f"Boss：{info.boss}")
+        if info.faction:
+            header_lines.append(f"阵营：{info.faction}")
+
+        rows: list[WorldstateRow] = []
+        if info.stages:
+            for idx, s in enumerate(info.stages, start=1):
+                mod = f" | {s.modifier}" if s.modifier else ""
+                rows.append(
+                    WorldstateRow(
+                        title=f"{idx}. {s.mission_type}",
+                        subtitle=f"{s.node}{mod}",
+                        right=f"剩余{info.eta}",
+                    )
+                )
+        else:
+            rows.append(WorldstateRow(title="(暂无任务详情)", right=f"剩余{info.eta}"))
+
+        rendered = await render_worldstate_rows_image_to_file(
+            title="执行官猎杀",
+            header_lines=header_lines,
+            rows=rows,
+            accent=(239, 68, 68, 255),
+        )
+        if rendered:
+            yield event.image_result(rendered.path)
+            return
+
+        head_parts: list[str] = [f"执行官猎杀（{platform_norm}）"]
+        if info.boss:
+            head_parts.append(str(info.boss))
+        if info.faction:
+            head_parts.append(str(info.faction))
+        head_parts.append(f"剩余{info.eta}")
+        lines: list[str] = [" ".join(head_parts)]
+        if not info.stages:
+            lines.append("(暂无任务详情)")
+            yield event.plain_result("\n".join(lines))
+            return
+        for idx, s in enumerate(info.stages, start=1):
+            mod = f" | {s.modifier}" if s.modifier else ""
+            lines.append(f"{idx}. {s.mission_type} - {s.node}{mod}")
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("钢铁奖励", alias={"steelreward", "sp奖励"})
+    async def wf_steel_reward(
+        self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()
+    ):
+        """查询钢铁之路当前奖励轮换（Steel Path）。"""
+
+        event.should_call_llm(False)
+
+        tokens = split_tokens(str(args))
+        platform_norm = worldstate_platform_from_tokens(tokens)
+
+        info = await self.worldstate_client.fetch_steel_path_reward(
+            platform=platform_norm, language="zh"
+        )
+        if not info:
+            yield event.plain_result(
+                "未获取到钢铁奖励信息（可能是网络限制或接口不可达）。"
+            )
+            return
+
+        reward = info.reward or "(未知奖励)"
+        rows = [
+            WorldstateRow(
+                title=f"当前奖励：{reward}",
+                subtitle=None,
+                right=f"剩余{info.eta}",
+            )
+        ]
+        rendered = await render_worldstate_rows_image_to_file(
+            title="钢铁奖励",
+            header_lines=[f"平台：{platform_norm}"],
+            rows=rows,
+            accent=(100, 116, 139, 255),
+        )
+        if rendered:
+            yield event.image_result(rendered.path)
+            return
+
+        yield event.plain_result(
+            f"钢铁奖励（{platform_norm}）\n- 当前：{reward}\n- 剩余{info.eta}"
+        )
 
     # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
     @filter.command("helloworld")
@@ -559,7 +431,7 @@ class WarframeHelperPlugin(Star):
             return
 
         # Cache paging context (used by /wfp prev|next)
-        self._pager_put_cache(
+        self._pager_cache.put(
             event=event,
             state={
                 "kind": "wm",
@@ -573,18 +445,20 @@ class WarframeHelperPlugin(Star):
         )
 
         # 缓存本次 TopN（用于后续“回复图片发数字”）
-        self._wm_put_pick_cache(
+        self._wm_pick_cache.put(
             event=event,
-            item_name_en=item.name,
-            order_type=order_type,
-            platform=platform_norm,
-            rows=[
-                {
-                    "name": (o.ingame_name or "").strip(),
-                    "platinum": int(o.platinum),
-                }
-                for o in top
-            ],
+            state={
+                "item_name_en": item.name,
+                "order_type": order_type,
+                "platform": platform_norm,
+                "rows": [
+                    {
+                        "name": (o.ingame_name or "").strip(),
+                        "platinum": int(o.platinum),
+                    }
+                    for o in top
+                ],
+            },
         )
 
         rendered = await render_wm_orders_image_to_file(
@@ -597,10 +471,10 @@ class WarframeHelperPlugin(Star):
         )
         if rendered:
             # QQ official webhook: send image + a markdown message with pager buttons.
-            if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
+            if self._qq_pager.enabled_for(event):
                 try:
                     await event.send(event.image_result(rendered.path))
-                    await self._qq_official_webhook_send_pager_keyboard(
+                    await self._qq_pager.send_pager_keyboard(
                         event,
                         kind="/wm",
                         page=page,
@@ -624,9 +498,9 @@ class WarframeHelperPlugin(Star):
         yield event.plain_result("\n".join(lines))
 
         # If qq_official_webhook and template configured, still try to append pager buttons.
-        if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
+        if self._qq_pager.enabled_for(event):
             try:
-                await self._qq_official_webhook_send_pager_keyboard(
+                await self._qq_pager.send_pager_keyboard(
                     event,
                     kind="/wm",
                     page=page,
@@ -1074,7 +948,7 @@ class WarframeHelperPlugin(Star):
             return
 
         # Cache paging context (used by /wfp prev|next)
-        self._pager_put_cache(
+        self._pager_cache.put(
             event=event,
             state={
                 "kind": "wmr",
@@ -1118,10 +992,10 @@ class WarframeHelperPlugin(Star):
             limit=len(top),
         )
         if rendered:
-            if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
+            if self._qq_pager.enabled_for(event):
                 try:
                     await event.send(event.image_result(rendered.path))
-                    await self._qq_official_webhook_send_pager_keyboard(
+                    await self._qq_pager.send_pager_keyboard(
                         event,
                         kind="/wmr",
                         page=page,
@@ -1147,9 +1021,9 @@ class WarframeHelperPlugin(Star):
             )
         yield event.plain_result("\n".join(lines))
 
-        if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
+        if self._qq_pager.enabled_for(event):
             try:
-                await self._qq_official_webhook_send_pager_keyboard(
+                await self._qq_pager.send_pager_keyboard(
                     event,
                     kind="/wmr",
                     page=page,
@@ -1175,7 +1049,7 @@ class WarframeHelperPlugin(Star):
         elif text in {"next", "下一页", "下", "down"}:
             direction = "next"
 
-        state = self._pager_get_cache(event)
+        state = self._pager_cache.get(event)
         if not state:
             yield event.plain_result("没有可翻页的记录，请先执行 /wm 或 /wmr。")
             return
@@ -1195,7 +1069,7 @@ class WarframeHelperPlugin(Star):
 
         state["page"] = page
         state["limit"] = limit
-        self._pager_put_cache(event=event, state=state)
+        self._pager_cache.put(event=event, state=state)
 
         if kind == "wm":
             item = state.get("item")
@@ -1232,18 +1106,20 @@ class WarframeHelperPlugin(Star):
                 return
 
             action_cn = "收购" if order_type == "buy" else "出售"
-            self._wm_put_pick_cache(
+            self._wm_pick_cache.put(
                 event=event,
-                item_name_en=getattr(item, "name", "") or "",
-                order_type=order_type,
-                platform=platform_norm,
-                rows=[
-                    {
-                        "name": (o.ingame_name or "").strip(),
-                        "platinum": int(o.platinum),
-                    }
-                    for o in top
-                ],
+                state={
+                    "item_name_en": getattr(item, "name", "") or "",
+                    "order_type": order_type,
+                    "platform": platform_norm,
+                    "rows": [
+                        {
+                            "name": (o.ingame_name or "").strip(),
+                            "platinum": int(o.platinum),
+                        }
+                        for o in top
+                    ],
+                },
             )
 
             rendered = await render_wm_orders_image_to_file(
@@ -1255,9 +1131,9 @@ class WarframeHelperPlugin(Star):
                 limit=limit,
             )
             if rendered:
-                if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
+                if self._qq_pager.enabled_for(event):
                     await event.send(event.image_result(rendered.path))
-                    await self._qq_official_webhook_send_pager_keyboard(
+                    await self._qq_pager.send_pager_keyboard(
                         event,
                         kind="/wm",
                         page=page,
@@ -1274,8 +1150,8 @@ class WarframeHelperPlugin(Star):
                 name = o.ingame_name or "unknown"
                 lines.append(f"{idx}. {o.platinum}p  {status}  {name}")
             yield event.plain_result("\n".join(lines))
-            if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
-                await self._qq_official_webhook_send_pager_keyboard(
+            if self._qq_pager.enabled_for(event):
+                await self._qq_pager.send_pager_keyboard(
                     event,
                     kind="/wm",
                     page=page,
@@ -1292,10 +1168,14 @@ class WarframeHelperPlugin(Star):
             language = str(state.get("language") or "zh")
             weapon_query = str(state.get("weapon_query") or "")
             positive_stats = [
-                str(x).strip() for x in (state.get("positive_stats") or []) if str(x).strip()
+                str(x).strip()
+                for x in (state.get("positive_stats") or [])
+                if str(x).strip()
             ]
             negative_stats = [
-                str(x).strip() for x in (state.get("negative_stats") or []) if str(x).strip()
+                str(x).strip()
+                for x in (state.get("negative_stats") or [])
+                if str(x).strip()
             ]
             negative_required = bool(state.get("negative_required") or False)
             mastery_rank_min = state.get("mastery_rank_min")
@@ -1367,7 +1247,9 @@ class WarframeHelperPlugin(Star):
 
                 return score
 
-            scored: list[tuple[int, object]] = [(stat_fit_score(a), a) for a in filtered]
+            scored: list[tuple[int, object]] = [
+                (stat_fit_score(a), a) for a in filtered
+            ]
             scored.sort(
                 key=lambda x: (
                     -int(x[0]),
@@ -1417,9 +1299,9 @@ class WarframeHelperPlugin(Star):
                 limit=len(top),
             )
             if rendered:
-                if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
+                if self._qq_pager.enabled_for(event):
                     await event.send(event.image_result(rendered.path))
-                    await self._qq_official_webhook_send_pager_keyboard(
+                    await self._qq_pager.send_pager_keyboard(
                         event,
                         kind="/wmr",
                         page=page,
@@ -1429,7 +1311,9 @@ class WarframeHelperPlugin(Star):
                 return
 
             fallback_name = (
-                weapon.item_name if language.startswith("en") else (weapon_query or weapon.item_name)
+                weapon.item_name
+                if language.startswith("en")
+                else (weapon_query or weapon.item_name)
             )
             lines = [f"紫卡 {fallback_name}（{platform_norm}）{summary} 第{page}页："]
             for idx, a in enumerate(top, start=1):
@@ -1442,8 +1326,8 @@ class WarframeHelperPlugin(Star):
                     f"{idx}. {a.buyout_price}p  {status}  {name}  MR{mr}  {pol}  洗练{rr}"
                 )
             yield event.plain_result("\n".join(lines))
-            if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
-                await self._qq_official_webhook_send_pager_keyboard(
+            if self._qq_pager.enabled_for(event):
+                await self._qq_pager.send_pager_keyboard(
                     event,
                     kind="/wmr",
                     page=page,
@@ -1467,7 +1351,7 @@ class WarframeHelperPlugin(Star):
         if not any(isinstance(c, Reply) for c in comps):
             return
 
-        rec = self._wm_get_pick_cache(event)
+        rec = self._wm_pick_cache.get(event)
         if not rec:
             return
 
@@ -1509,169 +1393,41 @@ class WarframeHelperPlugin(Star):
         )
         yield event.plain_result(whisper)
 
-    async def terminate(self):
-        """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
-
     @filter.command("突击", alias={"sortie"})
     async def wf_sortie(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
         """查询今日突击（Sortie）。"""
 
         event.should_call_llm(False)
-
-        tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-
-        info = await self.worldstate_client.fetch_sortie(
-            platform=platform_norm, language="zh"
+        result = await worldstate_commands.cmd_sortie(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
         )
-        if not info:
-            yield event.plain_result("未获取到突击信息（可能是网络限制或接口不可达）。")
-            return
-
-        header_lines: list[str] = [f"平台：{platform_norm}"]
-        if info.boss:
-            header_lines.append(f"Boss：{info.boss}")
-        if info.faction:
-            header_lines.append(f"阵营：{info.faction}")
-
-        rows: list[WorldstateRow] = []
-        if info.stages:
-            for idx, s in enumerate(info.stages, start=1):
-                mod = f" | {s.modifier}" if s.modifier else ""
-                rows.append(
-                    WorldstateRow(
-                        title=f"{idx}. {s.mission_type}",
-                        subtitle=f"{s.node}{mod}",
-                        right=f"剩余{info.eta}",
-                    )
-                )
-        else:
-            rows.append(WorldstateRow(title="(暂无任务详情)", right=f"剩余{info.eta}"))
-
-        rendered = await render_worldstate_rows_image_to_file(
-            title="突击",
-            header_lines=header_lines,
-            rows=rows,
-            accent=(59, 130, 246, 255),
-        )
-        if rendered:
-            yield event.image_result(rendered.path)
-            return
-
-        head_parts: list[str] = [f"突击（{platform_norm}）"]
-        if info.boss:
-            head_parts.append(str(info.boss))
-        if info.faction:
-            head_parts.append(str(info.faction))
-        head_parts.append(f"剩余{info.eta}")
-        lines: list[str] = [" ".join(head_parts)]
-
-        if not info.stages:
-            lines.append("(暂无任务详情)")
-            yield event.plain_result("\n".join(lines))
-            return
-
-        for idx, s in enumerate(info.stages, start=1):
-            mod = f" | {s.modifier}" if s.modifier else ""
-            lines.append(f"{idx}. {s.mission_type} - {s.node}{mod}")
-
-        yield event.plain_result("\n".join(lines))
+        yield result
 
     @filter.command("警报", alias={"alerts"})
     async def wf_alerts(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
         """查询当前警报。"""
 
         event.should_call_llm(False)
-
-        tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-
-        alerts = await self.worldstate_client.fetch_alerts(
-            platform=platform_norm, language="zh"
+        result = await worldstate_commands.cmd_alerts(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
         )
-        if alerts is None:
-            yield event.plain_result("未获取到警报信息（可能是网络限制或接口不可达）。")
-            return
-        if not alerts:
-            yield event.plain_result(f"当前无警报（{platform_norm}）。")
-            return
-
-        rows: list[WorldstateRow] = []
-        for a in alerts[:20]:
-            lvl = ""
-            if a.min_level is not None and a.max_level is not None:
-                lvl = f" Lv{a.min_level}-{a.max_level}"
-            sub_parts = []
-            if a.faction:
-                sub_parts.append(str(a.faction))
-            if a.reward:
-                sub_parts.append(str(a.reward))
-            subtitle = " | ".join(sub_parts) if sub_parts else None
-            rows.append(
-                WorldstateRow(
-                    title=f"{a.mission_type} - {a.node}{lvl}",
-                    subtitle=subtitle,
-                    right=f"剩余{a.eta}",
-                )
-            )
-
-        rendered = await render_worldstate_rows_image_to_file(
-            title="警报",
-            header_lines=[
-                f"平台：{platform_norm}",
-                f"共{len(alerts)}条（展示前{min(20, len(alerts))}条）",
-            ],
-            rows=rows,
-            accent=(245, 158, 11, 255),
-        )
-        if rendered:
-            yield event.image_result(rendered.path)
-            return
-
-        lines: list[str] = [f"警报（{platform_norm}）共{len(alerts)}条："]
-        for a in alerts:
-            lvl = ""
-            if a.min_level is not None and a.max_level is not None:
-                lvl = f" Lv{a.min_level}-{a.max_level}"
-            rew = f" | {a.reward}" if a.reward else ""
-            fac = f" | {a.faction}" if a.faction else ""
-            lines.append(f"- {a.mission_type} {a.node}{lvl} | 剩余{a.eta}{fac}{rew}")
-
-        yield event.plain_result("\n".join(lines))
+        yield result
 
     @filter.command("裂缝", alias={"fissure"})
     async def wf_fissures(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
         """查询虚空裂缝：支持 普通/钢铁/九重天（九重天=风暴裂缝）。"""
 
         event.should_call_llm(False)
-
-        tokens = split_tokens(str(args))
-        fissure_kind = "普通"  # 普通/钢铁/九重天
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-
-        for t in tokens:
-            t2 = str(t).strip().lower()
-            if t2 in {"九重天", "九重", "风暴", "storm"}:
-                fissure_kind = "九重天"
-                continue
-            if t2 in {"钢铁", "钢", "sp", "steel"}:
-                fissure_kind = "钢铁"
-                continue
-            if t2 in {"普通", "正常", "normal"}:
-                fissure_kind = "普通"
-                continue
-
-        rendered = await self._render_fissures_image(
-            platform_norm=platform_norm, fissure_kind=fissure_kind
+        result = await worldstate_commands.cmd_fissures(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
         )
-        if rendered:
-            yield event.image_result(rendered.path)
-            return
-
-        text = await self._render_fissures_text(
-            platform_norm=platform_norm, fissure_kind=fissure_kind
-        )
-        yield event.plain_result(text)
+        yield result
 
     @filter.command("九重天裂缝", alias={"风暴裂缝"})
     async def wf_fissures_storm(
@@ -1679,18 +1435,13 @@ class WarframeHelperPlugin(Star):
     ):
         """别称：/九重天裂缝 = /裂缝 九重天"""
         event.should_call_llm(False)
-        tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-        rendered = await self._render_fissures_image(
-            platform_norm=platform_norm, fissure_kind="九重天"
+        result = await worldstate_commands.cmd_fissures_kind(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
+            fissure_kind="九重天",
         )
-        if rendered:
-            yield event.image_result(rendered.path)
-            return
-        text = await self._render_fissures_text(
-            platform_norm=platform_norm, fissure_kind="九重天"
-        )
-        yield event.plain_result(text)
+        yield result
 
     @filter.command("钢铁裂缝")
     async def wf_fissures_hard(
@@ -1698,18 +1449,13 @@ class WarframeHelperPlugin(Star):
     ):
         """别称：/钢铁裂缝 = /裂缝 钢铁"""
         event.should_call_llm(False)
-        tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-        rendered = await self._render_fissures_image(
-            platform_norm=platform_norm, fissure_kind="钢铁"
+        result = await worldstate_commands.cmd_fissures_kind(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
+            fissure_kind="钢铁",
         )
-        if rendered:
-            yield event.image_result(rendered.path)
-            return
-        text = await self._render_fissures_text(
-            platform_norm=platform_norm, fissure_kind="钢铁"
-        )
-        yield event.plain_result(text)
+        yield result
 
     @filter.command("普通裂缝")
     async def wf_fissures_normal(
@@ -1717,18 +1463,13 @@ class WarframeHelperPlugin(Star):
     ):
         """别称：/普通裂缝 = /裂缝 普通"""
         event.should_call_llm(False)
-        tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-        rendered = await self._render_fissures_image(
-            platform_norm=platform_norm, fissure_kind="普通"
+        result = await worldstate_commands.cmd_fissures_kind(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
+            fissure_kind="普通",
         )
-        if rendered:
-            yield event.image_result(rendered.path)
-            return
-        text = await self._render_fissures_text(
-            platform_norm=platform_norm, fissure_kind="普通"
-        )
-        yield event.plain_result(text)
+        yield result
 
     @filter.command("奸商", alias={"虚空商人", "baro"})
     async def wf_void_trader(
@@ -1737,71 +1478,12 @@ class WarframeHelperPlugin(Star):
         """查询奸商（Baro Ki'Teer / Void Trader）。"""
 
         event.should_call_llm(False)
-
-        tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-
-        info = await self.worldstate_client.fetch_void_trader(
-            platform=platform_norm, language="zh"
+        result = await worldstate_commands.cmd_void_trader(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
         )
-        if info is None:
-            yield event.plain_result("未获取到奸商信息（可能是网络限制或接口不可达）。")
-            return
-
-        if not info.active:
-            yield event.plain_result(f"奸商未到访（{platform_norm}），预计{info.eta}。")
-            return
-
-        rows: list[WorldstateRow] = []
-        if info.inventory:
-            for it in info.inventory[:30]:
-                price = []
-                if it.ducats is not None:
-                    price.append(f"{it.ducats}D")
-                if it.credits is not None:
-                    price.append(f"{it.credits}CR")
-                rows.append(
-                    WorldstateRow(
-                        title=it.item, right=" / ".join(price) if price else None
-                    )
-                )
-        else:
-            rows.append(WorldstateRow(title="(未返回商品清单)"))
-
-        rendered = await render_worldstate_rows_image_to_file(
-            title="奸商",
-            header_lines=[
-                f"平台：{platform_norm}",
-                f"地点：{info.location or '未知'}",
-                f"剩余：{info.eta}",
-            ],
-            rows=rows,
-            accent=(14, 165, 233, 255),
-        )
-        if rendered:
-            yield event.image_result(rendered.path)
-            return
-
-        lines: list[str] = [
-            f"奸商（{platform_norm}）已到访：",
-            f"- 地点：{info.location or '未知'}",
-            f"- 剩余：{info.eta}",
-        ]
-        if not info.inventory:
-            lines.append("- (未返回商品清单)")
-            yield event.plain_result("\n".join(lines))
-            return
-
-        for it in info.inventory[:30]:
-            price = []
-            if it.ducats is not None:
-                price.append(f"{it.ducats}D")
-            if it.credits is not None:
-                price.append(f"{it.credits}CR")
-            p = " / ".join(price)
-            lines.append(f"- {it.item}{(' | ' + p) if p else ''}")
-
-        yield event.plain_result("\n".join(lines))
+        yield result
 
     @filter.command("仲裁", alias={"arbitration"})
     async def wf_arbitration(
@@ -1810,37 +1492,12 @@ class WarframeHelperPlugin(Star):
         """查询仲裁（Arbitration）。"""
 
         event.should_call_llm(False)
-
-        tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-
-        info = await self.worldstate_client.fetch_arbitration(
-            platform=platform_norm, language="zh"
+        result = await worldstate_commands.cmd_arbitration(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
         )
-        if info is None:
-            yield event.plain_result("未获取到仲裁信息（可能是网络限制或接口不可达）。")
-            return
-
-        rendered = await render_worldstate_rows_image_to_file(
-            title="仲裁",
-            header_lines=[f"平台：{platform_norm}"],
-            rows=[
-                WorldstateRow(
-                    title=f"{info.mission_type} - {info.node}",
-                    subtitle=info.enemy or None,
-                    right=f"剩余{info.eta}",
-                )
-            ],
-            accent=(100, 116, 139, 255),
-        )
-        if rendered:
-            yield event.image_result(rendered.path)
-            return
-
-        enemy = f" | {info.enemy}" if info.enemy else ""
-        yield event.plain_result(
-            f"仲裁（{platform_norm}）\n- {info.mission_type} - {info.node}{enemy}\n- 剩余{info.eta}",
-        )
+        yield result
 
     @filter.command("电波", alias={"夜波", "nightwave"})
     async def wf_nightwave(
@@ -1849,66 +1506,12 @@ class WarframeHelperPlugin(Star):
         """查询电波（Nightwave）。"""
 
         event.should_call_llm(False)
-        tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-
-        info = await self.worldstate_client.fetch_nightwave(
-            platform=platform_norm, language="zh"
+        result = await worldstate_commands.cmd_nightwave(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
         )
-        if info is None:
-            yield event.plain_result("未获取到电波信息（可能是网络限制或接口不可达）。")
-            return
-
-        title = f"电波（{platform_norm}）"
-        if info.season is not None:
-            title += f" S{info.season}"
-        if info.phase is not None:
-            title += f" P{info.phase}"
-
-        lines: list[str] = [f"{title}\n- 剩余{info.eta}"]
-        if not info.active_challenges:
-            lines.append("- (未返回挑战列表)")
-            rendered = await render_worldstate_rows_image_to_file(
-                title="电波",
-                header_lines=[f"平台：{platform_norm}", f"剩余：{info.eta}"],
-                rows=[WorldstateRow(title="(未返回挑战列表)")],
-                accent=(124, 58, 237, 255),
-            )
-            if rendered:
-                yield event.image_result(rendered.path)
-                return
-            yield event.plain_result("\n".join(lines))
-            return
-
-        rows: list[WorldstateRow] = []
-        for c in info.active_challenges[:12]:
-            kind = "日常" if c.is_daily else "周常"
-            rep = f"+{c.reputation}" if c.reputation is not None else ""
-            rows.append(
-                WorldstateRow(
-                    title=c.title,
-                    subtitle=rep or None,
-                    right=f"剩余{c.eta}",
-                    tag=kind,
-                )
-            )
-
-        rendered = await render_worldstate_rows_image_to_file(
-            title="电波",
-            header_lines=[f"平台：{platform_norm}", f"剩余：{info.eta}"],
-            rows=rows,
-            accent=(124, 58, 237, 255),
-        )
-        if rendered:
-            yield event.image_result(rendered.path)
-            return
-
-        for c in info.active_challenges[:12]:
-            kind = "日常" if c.is_daily else "周常"
-            rep = f" +{c.reputation}" if c.reputation is not None else ""
-            lines.append(f"- [{kind}] {c.title}{rep} | 剩余{c.eta}")
-
-        yield event.plain_result("\n".join(lines))
+        yield result
 
     @filter.command("平原")
     async def wf_plains(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
@@ -1919,204 +1522,12 @@ class WarframeHelperPlugin(Star):
         """
 
         event.should_call_llm(False)
-
-        raw_tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(raw_tokens)
-
-        def norm(text: str) -> str:
-            return re.sub(r"\s+", "", str(text).strip().lower())
-
-        # Strip platform tokens from query tokens.
-        platform_tokens = {
-            norm(k) for k in WORLDSTATE_PLATFORM_ALIASES.keys() if k
-        } | {norm(v) for v in WORLDSTATE_PLATFORM_ALIASES.values() if v}
-        query_tokens = [t for t in raw_tokens if norm(t) not in platform_tokens]
-        query = "".join([t.strip() for t in query_tokens if t.strip()])
-        qn = norm(query)
-
-        plains: list[tuple[str, set[str]]] = [
-            ("夜灵平原", {"夜灵平原", "希图斯", "cetus", "poe"}),
-            (
-                "奥布山谷",
-                {"奥布山谷", "金星平原", "福尔图娜", "vallis", "orb", "orbvallis", "fortuna"},
-            ),
-            ("魔胎之境", {"魔胎之境", "魔胎", "cambion"}),
-        ]
-
-        def match_plain(name: str, aliases: set[str], q: str) -> bool:
-            if not q:
-                return False
-            if q in norm(name):
-                return True
-            for a in aliases:
-                if q in norm(a):
-                    return True
-            return False
-
-        if qn:
-            matched = [p for p in plains if match_plain(p[0], p[1], qn)]
-            if not matched:
-                yield event.plain_result(
-                    "未识别平原名称。用法：/平原 [希图斯/福尔图娜/魔胎] [平台]；不带参数列出全部平原状态。"
-                )
-                return
-            if len(matched) > 1:
-                names = "、".join([m[0] for m in matched])
-                yield event.plain_result(
-                    f"匹配到多个平原：{names}。请把参数写得更具体一些。"
-                )
-                return
-
-            plain_name = matched[0][0]
-            if plain_name == "夜灵平原":
-                info = await self.worldstate_client.fetch_cetus_cycle(
-                    platform=platform_norm, language="zh"
-                )
-                if info is None:
-                    yield event.plain_result(
-                        "未获取到夜灵平原信息（可能是网络限制或接口不可达）。"
-                    )
-                    return
-                state_cn = info.state or (
-                    "白天" if info.is_day else ("夜晚" if info.is_day is False else "未知")
-                )
-                left = info.time_left or info.eta
-                yield await self._render_worldstate_cycle(
-                    event,
-                    title="夜灵平原",
-                    platform_norm=platform_norm,
-                    state_cn=state_cn,
-                    left=left,
-                    start_time=getattr(info, "start_time", None),
-                    end_time=getattr(info, "end_time", None),
-                    accent=(20, 184, 166, 255),
-                    plain_prefix="夜灵平原",
-                )
-                return
-
-            if plain_name == "奥布山谷":
-                info = await self.worldstate_client.fetch_vallis_cycle(
-                    platform=platform_norm, language="zh"
-                )
-                if info is None:
-                    yield event.plain_result(
-                        "未获取到奥布山谷信息（可能是网络限制或接口不可达）。"
-                    )
-                    return
-                state_cn = info.state or (
-                    "温暖" if info.is_warm else ("寒冷" if info.is_warm is False else "未知")
-                )
-                left = info.time_left or info.eta
-                yield await self._render_worldstate_cycle(
-                    event,
-                    title="奥布山谷",
-                    platform_norm=platform_norm,
-                    state_cn=state_cn,
-                    left=left,
-                    start_time=getattr(info, "start_time", None),
-                    end_time=getattr(info, "end_time", None),
-                    accent=(20, 184, 166, 255),
-                    plain_prefix="奥布山谷",
-                )
-                return
-
-            # 魔胎之境
-            info = await self.worldstate_client.fetch_cambion_cycle(
-                platform=platform_norm, language="zh"
-            )
-            if info is None:
-                yield event.plain_result(
-                    "未获取到魔胎之境信息（可能是网络限制或接口不可达）。"
-                )
-                return
-            state_cn = info.active or info.state or "未知"
-            left = info.time_left or info.eta
-            yield await self._render_worldstate_cycle(
-                event,
-                title="魔胎之境",
-                platform_norm=platform_norm,
-                state_cn=state_cn,
-                left=left,
-                start_time=getattr(info, "start_time", None),
-                end_time=getattr(info, "end_time", None),
-                accent=(20, 184, 166, 255),
-                plain_prefix="魔胎之境",
-            )
-            return
-
-        # No query: list all plains.
-        try:
-            cetus = await self.worldstate_client.fetch_cetus_cycle(
-                platform=platform_norm, language="zh"
-            )
-        except Exception:
-            cetus = None
-
-        try:
-            vallis = await self.worldstate_client.fetch_vallis_cycle(
-                platform=platform_norm, language="zh"
-            )
-        except Exception:
-            vallis = None
-
-        try:
-            cambion = await self.worldstate_client.fetch_cambion_cycle(
-                platform=platform_norm, language="zh"
-            )
-        except Exception:
-            cambion = None
-
-        rows: list[WorldstateRow] = []
-        # 夜灵平原
-        if cetus is None:
-            rows.append(WorldstateRow(title="夜灵平原", subtitle="(获取失败)", right=None))
-        else:
-            state_cn = cetus.state or (
-                "白天" if cetus.is_day else ("夜晚" if cetus.is_day is False else "未知")
-            )
-            left = cetus.time_left or cetus.eta
-            rows.append(
-                WorldstateRow(title="夜灵平原", subtitle=f"当前：{state_cn}", right=f"剩余{left}")
-            )
-
-        # 奥布山谷
-        if vallis is None:
-            rows.append(WorldstateRow(title="奥布山谷", subtitle="(获取失败)", right=None))
-        else:
-            state_cn = vallis.state or (
-                "温暖" if vallis.is_warm else ("寒冷" if vallis.is_warm is False else "未知")
-            )
-            left = vallis.time_left or vallis.eta
-            rows.append(
-                WorldstateRow(title="奥布山谷", subtitle=f"当前：{state_cn}", right=f"剩余{left}")
-            )
-
-        # 魔胎之境
-        if cambion is None:
-            rows.append(WorldstateRow(title="魔胎之境", subtitle="(获取失败)", right=None))
-        else:
-            state_cn = cambion.active or cambion.state or "未知"
-            left = cambion.time_left or cambion.eta
-            rows.append(
-                WorldstateRow(title="魔胎之境", subtitle=f"当前：{state_cn}", right=f"剩余{left}")
-            )
-
-        rendered = await render_worldstate_rows_image_to_file(
-            title="平原状态",
-            header_lines=[f"平台：{platform_norm}"],
-            rows=rows,
-            accent=(20, 184, 166, 255),
+        result = await worldstate_commands.cmd_plains(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
         )
-        if rendered:
-            yield event.image_result(rendered.path)
-            return
-
-        lines = [f"平原状态（{platform_norm}）："]
-        for r in rows:
-            right = f" {r.right}" if r.right else ""
-            sub = f" {r.subtitle}" if r.subtitle else ""
-            lines.append(f"- {r.title}{sub}{right}")
-        yield event.plain_result("\n".join(lines))
+        yield result
 
     @filter.command("夜灵平原", alias={"希图斯", "cetus", "poe"})
     async def wf_cetus_cycle(
@@ -2125,33 +1536,13 @@ class WarframeHelperPlugin(Star):
         """查询夜灵平原昼夜循环（Cetus Cycle）。"""
 
         event.should_call_llm(False)
-        tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-
-        info = await self.worldstate_client.fetch_cetus_cycle(
-            platform=platform_norm, language="zh"
+        result = await worldstate_commands.cmd_cycle(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
+            cycle="cetus",
         )
-        if info is None:
-            yield event.plain_result(
-                "未获取到夜灵平原信息（可能是网络限制或接口不可达）。"
-            )
-            return
-
-        state_cn = info.state or (
-            "白天" if info.is_day else ("夜晚" if info.is_day is False else "未知")
-        )
-        left = info.time_left or info.eta
-        yield await self._render_worldstate_cycle(
-            event,
-            title="夜灵平原",
-            platform_norm=platform_norm,
-            state_cn=state_cn,
-            left=left,
-            start_time=getattr(info, "start_time", None),
-            end_time=getattr(info, "end_time", None),
-            accent=(20, 184, 166, 255),
-            plain_prefix="夜灵平原",
-        )
+        yield result
 
     @filter.command("魔胎之境", alias={"魔胎", "cambion"})
     async def wf_cambion_cycle(
@@ -2160,31 +1551,13 @@ class WarframeHelperPlugin(Star):
         """查询魔胎之境轮换（Cambion Cycle）。"""
 
         event.should_call_llm(False)
-        tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-
-        info = await self.worldstate_client.fetch_cambion_cycle(
-            platform=platform_norm, language="zh"
+        result = await worldstate_commands.cmd_cycle(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
+            cycle="cambion",
         )
-        if info is None:
-            yield event.plain_result(
-                "未获取到魔胎之境信息（可能是网络限制或接口不可达）。"
-            )
-            return
-
-        state_cn = info.active or info.state or "未知"
-        left = info.time_left or info.eta
-        yield await self._render_worldstate_cycle(
-            event,
-            title="魔胎之境",
-            platform_norm=platform_norm,
-            state_cn=state_cn,
-            left=left,
-            start_time=getattr(info, "start_time", None),
-            end_time=getattr(info, "end_time", None),
-            accent=(20, 184, 166, 255),
-            plain_prefix="魔胎之境",
-        )
+        yield result
 
     @filter.command("地球昼夜", alias={"地球循环", "地球", "earth"})
     async def wf_earth_cycle(
@@ -2193,33 +1566,13 @@ class WarframeHelperPlugin(Star):
         """查询地球昼夜循环（Earth Cycle）。"""
 
         event.should_call_llm(False)
-        tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-
-        info = await self.worldstate_client.fetch_earth_cycle(
-            platform=platform_norm, language="zh"
+        result = await worldstate_commands.cmd_cycle(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
+            cycle="earth",
         )
-        if info is None:
-            yield event.plain_result(
-                "未获取到地球循环信息（可能是网络限制或接口不可达）。"
-            )
-            return
-
-        state_cn = info.state or (
-            "白天" if info.is_day else ("夜晚" if info.is_day is False else "未知")
-        )
-        left = info.time_left or info.eta
-        yield await self._render_worldstate_cycle(
-            event,
-            title="地球昼夜",
-            platform_norm=platform_norm,
-            state_cn=state_cn,
-            left=left,
-            start_time=getattr(info, "start_time", None),
-            end_time=getattr(info, "end_time", None),
-            accent=(20, 184, 166, 255),
-            plain_prefix="地球",
-        )
+        yield result
 
     @filter.command(
         "奥布山谷",
@@ -2231,118 +1584,103 @@ class WarframeHelperPlugin(Star):
         """查询奥布山谷温/寒循环（Orb Vallis Cycle）。"""
 
         event.should_call_llm(False)
-        tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-
-        info = await self.worldstate_client.fetch_vallis_cycle(
-            platform=platform_norm, language="zh"
+        result = await worldstate_commands.cmd_cycle(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
+            cycle="vallis",
         )
-        if info is None:
-            yield event.plain_result(
-                "未获取到奥布山谷信息（可能是网络限制或接口不可达）。"
-            )
-            return
+        yield result
 
-        state_cn = info.state or (
-            "温暖" if info.is_warm else ("寒冷" if info.is_warm is False else "未知")
-        )
-        left = info.time_left or info.eta
-        yield await self._render_worldstate_cycle(
-            event,
-            title="奥布山谷",
-            platform_norm=platform_norm,
-            state_cn=state_cn,
-            left=left,
-            start_time=getattr(info, "start_time", None),
-            end_time=getattr(info, "end_time", None),
-            accent=(20, 184, 166, 255),
-            plain_prefix="奥布山谷",
-        )
-
-    @filter.command("双衍王境", alias={"双衍", "双衍循环", "duviri"})
+    @filter.command("双衍王境", alias={"双衍", "双衍循环", "双衍王镜", "duviri"})
     async def wf_duviri_cycle(
         self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()
     ):
         """查询双衍王境情绪轮换（Duviri Cycle）。"""
 
         event.should_call_llm(False)
-        tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-
-        info = await self.worldstate_client.fetch_duviri_cycle(
-            platform=platform_norm, language="zh"
+        result = await worldstate_commands.cmd_cycle(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
+            cycle="duviri",
         )
-        if info is None:
-            yield event.plain_result(
-                "未获取到双衍王境信息（可能是网络限制或接口不可达）。"
-            )
-            return
+        yield result
 
-        state = (info.state or "未知").strip()
-        left = info.time_left or info.eta
-        yield await self._render_worldstate_cycle(
-            event,
-            title="双衍王境",
-            platform_norm=platform_norm,
-            state_cn=state,
-            left=left,
-            start_time=getattr(info, "start_time", None),
-            end_time=getattr(info, "end_time", None),
-            accent=(20, 184, 166, 255),
-            plain_prefix="双衍王境",
+    @filter.command("轮回奖励", alias={"双衍轮回", "双衍轮回奖励", "circuit"})
+    async def wf_duviri_circuit_rewards(
+        self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()
+    ):
+        """查询双衍王境「轮回」奖励轮换（普通/钢铁）。"""
+
+        event.should_call_llm(False)
+        result = await worldstate_commands.cmd_duviri_circuit_rewards(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
         )
+        yield result
 
     @filter.command("武器", alias={"weapon", "wfweapon"})
     async def wf_weapon(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
         """根据 PublicExport 查询武器（中文优先，也支持英文/uniqueName 匹配）。用法：/武器 绝路"""
 
         event.should_call_llm(False)
-        query = str(args).strip()
-        if not query:
-            yield event.plain_result(
-                "用法：/武器 <名称> 例如：/武器 绝路 或 /武器 soma"
-            )
-            return
-
-        items = await self.public_export_client.search_weapon(
-            query, language="zh", limit=5
+        result = await public_export_commands.cmd_weapon(
+            event=event,
+            query=str(args),
+            public_export_client=self.public_export_client,
         )
-        if not items:
-            yield event.plain_result(f"未找到武器：{query}")
-            return
+        yield result
 
-        rows: list[WorldstateRow] = []
-        lines: list[str] = [f"武器搜索：{query}（展示前{len(items)}条）"]
-        for w in items:
-            name = w.get("name") if isinstance(w, dict) else None
-            uniq = w.get("uniqueName") if isinstance(w, dict) else None
-            mr = w.get("masteryReq") if isinstance(w, dict) else None
-            cat = w.get("category") if isinstance(w, dict) else None
+    @filter.command("战甲", alias={"warframe", "frame", "wfwarframe"})
+    async def wf_warframe(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
+        """根据 PublicExport 查询战甲条目（基础面板信息，字段尽量容错）。用法：/战甲 牛甲"""
 
-            name_s = str(name) if isinstance(name, str) and name else "?"
-            uniq_s = str(uniq) if isinstance(uniq, str) and uniq else ""
-            mr_s = f"MR{mr}" if isinstance(mr, int) else None
-            cat_s = str(cat) if isinstance(cat, str) and cat else None
-            right = " ".join([x for x in [mr_s, cat_s] if x]) or None
-
-            rows.append(
-                WorldstateRow(title=name_s, subtitle=uniq_s or None, right=right)
-            )
-            suffix = f" | {right}" if right else ""
-            extra = f" | {uniq_s}" if uniq_s else ""
-            lines.append(f"- {name_s}{suffix}{extra}")
-
-        rendered = await render_worldstate_rows_image_to_file(
-            title="武器",
-            header_lines=["数据源：PublicExport", f"查询：{query}"],
-            rows=rows,
-            accent=(245, 158, 11, 255),
+        event.should_call_llm(False)
+        result = await public_export_commands.cmd_warframe(
+            event=event,
+            query=str(args),
+            public_export_client=self.public_export_client,
         )
-        if rendered:
-            yield event.image_result(rendered.path)
-            return
+        yield result
 
-        yield event.plain_result("\n".join(lines))
+    @filter.command("MOD", alias={"mod", "模组", "mods"})
+    async def wf_mod(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
+        """根据 PublicExport 查询 MOD/升级条目（名称模糊匹配）。用法：/MOD 过载"""
+
+        event.should_call_llm(False)
+        result = await public_export_commands.cmd_mod(
+            event=event,
+            query=str(args),
+            public_export_client=self.public_export_client,
+        )
+        yield result
+
+    @filter.command("掉落", alias={"drop", "drops"})
+    async def wf_drops(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
+        """根据 WFCD/warframe-drop-data 查询物品掉落地点。用法：/掉落 <物品> [数量<=30]"""
+
+        event.should_call_llm(False)
+        result = await drop_data_commands.cmd_drops(
+            event=event,
+            raw_args=str(args),
+            drop_data_client=self.drop_data_client,
+            public_export_client=self.public_export_client,
+        )
+        yield result
+
+    @filter.command("遗物", alias={"relic", "relics"})
+    async def wf_relic(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
+        """根据 WFCD/warframe-drop-data 查询遗物奖池。用法：/遗物 <纪元> <遗物名> 或 /遗物 <遗物名>"""
+
+        event.should_call_llm(False)
+        result = await drop_data_commands.cmd_relic(
+            event=event,
+            raw_args=str(args),
+            drop_data_client=self.drop_data_client,
+        )
+        yield result
 
     @filter.command("入侵", alias={"invasions"})
     async def wf_invasions(
@@ -2351,64 +1689,12 @@ class WarframeHelperPlugin(Star):
         """查询当前入侵（Invasions）。用法：/入侵 [平台] [数量<=20]"""
 
         event.should_call_llm(False)
-
-        tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-
-        limit = 10
-        for t in tokens:
-            if str(t).isdigit():
-                limit = int(str(t))
-                break
-        limit = max(1, min(limit, 20))
-
-        inv = await self.worldstate_client.fetch_invasions(
-            platform=platform_norm, language="zh"
+        result = await worldstate_commands.cmd_invasions(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
         )
-        if inv is None:
-            yield event.plain_result("未获取到入侵信息（可能是网络限制或接口不可达）。")
-            return
-        if not inv:
-            yield event.plain_result(f"当前无入侵（{platform_norm}）。")
-            return
-
-        inv.sort(key=lambda x: (self._eta_key(x.eta), -(x.completion or 0.0)))
-
-        rows: list[WorldstateRow] = []
-        for i in inv[:limit]:
-            sides = (
-                " vs ".join([x for x in [i.attacker, i.defender] if x]) or "未知阵营"
-            )
-            comp = f"进度{i.completion:.0f}%" if i.completion is not None else ""
-            subtitle_parts = [p for p in [comp, i.reward] if p]
-            rows.append(
-                WorldstateRow(
-                    title=f"{i.node} | {sides}",
-                    subtitle=" | ".join(subtitle_parts) if subtitle_parts else None,
-                    right=f"剩余{i.eta}",
-                )
-            )
-
-        rendered = await render_worldstate_rows_image_to_file(
-            title="入侵",
-            header_lines=[f"平台：{platform_norm}", f"展示前{min(limit, len(inv))}条"],
-            rows=rows,
-            accent=(249, 115, 22, 255),
-        )
-        if rendered:
-            yield event.image_result(rendered.path)
-            return
-
-        lines: list[str] = [f"入侵（{platform_norm}）前{min(limit, len(inv))}条："]
-        for i in inv[:limit]:
-            sides = (
-                " vs ".join([x for x in [i.attacker, i.defender] if x]) or "未知阵营"
-            )
-            comp = f" | 进度{i.completion:.0f}%" if i.completion is not None else ""
-            rew = f" | {i.reward}" if i.reward else ""
-            lines.append(f"- {i.node} | {sides} | 剩余{i.eta}{comp}{rew}")
-
-        yield event.plain_result("\n".join(lines))
+        yield result
 
     @filter.command("集团", alias={"syndicate", "syndicates"})
     async def wf_syndicates(
@@ -2424,137 +1710,9 @@ class WarframeHelperPlugin(Star):
         """
 
         event.should_call_llm(False)
-
-        tokens = split_tokens(str(args))
-        platform_norm = self._worldstate_platform_from_tokens(tokens)
-
-        # Optional: syndicate name query (remove platform tokens first).
-        def is_platform_token(tok: str) -> bool:
-            t = (tok or "").strip().lower()
-            return (
-                t in WORLDSTATE_PLATFORM_ALIASES
-                or t in WORLDSTATE_PLATFORM_ALIASES.values()
-            )
-
-        name_tokens: list[str] = []
-        for t in tokens:
-            s = str(t).strip()
-            if not s:
-                continue
-            if is_platform_token(s):
-                continue
-            name_tokens.append(s)
-
-        syndicate_query = " ".join(name_tokens).strip()
-
-        syndicates = await self.worldstate_client.fetch_syndicates(
-            platform=platform_norm, language="zh"
+        result = await worldstate_commands.cmd_syndicates(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
         )
-        if syndicates is None:
-            yield event.plain_result(
-                "未获取到集团任务信息（可能是网络限制或接口不可达）。"
-            )
-            return
-        if not syndicates:
-            yield event.plain_result(f"当前无集团任务（{platform_norm}）。")
-            return
-
-        def norm(s: str) -> str:
-            return re.sub(r"\s+", "", (s or "").strip().lower())
-
-        # If user specified a syndicate name, list that syndicate's jobs.
-        if syndicate_query:
-            qn = norm(syndicate_query)
-            matched = [s for s in syndicates if qn and qn in norm(s.name)]
-
-            if not matched:
-                names = "、".join([s.name for s in syndicates])
-                yield event.plain_result(
-                    f"未找到集团：{syndicate_query}（{platform_norm}）。可用集团：{names}"
-                )
-                return
-
-            if len(matched) > 1:
-                names = "、".join([s.name for s in matched])
-                yield event.plain_result(
-                    f"匹配到多个集团：{names}。请更精确一些（例如输入完整名称）。"
-                )
-                return
-
-            s = matched[0]
-            jobs = list(s.jobs or ())
-            if not jobs:
-                yield event.plain_result(f"{s.name}（{platform_norm}）当前无任务。")
-                return
-
-            rows: list[WorldstateRow] = []
-            for j in jobs[:18]:
-                node = j.node or "?"
-                mtype = j.mission_type or "?"
-                rows.append(
-                    WorldstateRow(
-                        title=f"{mtype} - {node}",
-                        right=f"剩余{j.eta}" if j.eta else None,
-                    )
-                )
-
-            rendered = await render_worldstate_rows_image_to_file(
-                title=f"集团 {s.name}",
-                header_lines=[
-                    f"平台：{platform_norm}",
-                    f"剩余：{s.eta}",
-                    f"共{len(jobs)}条（展示前{min(18, len(jobs))}条）",
-                ],
-                rows=rows,
-                accent=(16, 185, 129, 255),
-            )
-            if rendered:
-                yield event.image_result(rendered.path)
-                return
-
-            lines: list[str] = [
-                f"集团 {s.name}（{platform_norm}）剩余{s.eta}：共{len(jobs)}条",
-            ]
-            for j in jobs:
-                node = j.node or "?"
-                mtype = j.mission_type or "?"
-                lines.append(f"- {mtype} - {node} | 剩余{j.eta}")
-            yield event.plain_result("\n".join(lines))
-            return
-
-        rows: list[WorldstateRow] = []
-        for s in syndicates[:10]:
-            jobs = []
-            for j in s.jobs[:3]:
-                node = j.node or "?"
-                mtype = j.mission_type or "?"
-                jobs.append(f"{mtype}-{node}")
-            subtitle = " | ".join(jobs) if jobs else None
-            rows.append(
-                WorldstateRow(title=s.name, subtitle=subtitle, right=f"剩余{s.eta}")
-            )
-
-        rendered = await render_worldstate_rows_image_to_file(
-            title="集团任务",
-            header_lines=[
-                f"平台：{platform_norm}",
-                f"共{len(syndicates)}组（展示前{min(10, len(syndicates))}组）",
-            ],
-            rows=rows,
-            accent=(16, 185, 129, 255),
-        )
-        if rendered:
-            yield event.image_result(rendered.path)
-            return
-
-        lines: list[str] = [f"集团任务（{platform_norm}）共{len(syndicates)}组："]
-        for s in syndicates:
-            lines.append(f"- {s.name} | 剩余{s.eta}")
-            if not s.jobs:
-                continue
-            for j in s.jobs[:3]:
-                node = j.node or "?"
-                mtype = j.mission_type or "?"
-                lines.append(f"  - {mtype} - {node}")
-
-        yield event.plain_result("\n".join(lines))
+        yield result
