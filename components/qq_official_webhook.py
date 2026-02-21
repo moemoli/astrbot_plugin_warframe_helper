@@ -119,10 +119,10 @@ class QQOfficialWebhookPager:
             return {
                 "custom_template_id": self._markdown_template_id,
                 "params": [
-                    {"key": "title", "values": "Warframe 助手"},
-                    {"key": "kind", "values": str(kind)},
-                    {"key": "page", "values": str(page_norm)},
-                    {"key": "hint", "values": "使用下方按钮：上一页 / 下一页"},
+                    {"key": "title", "values": ["Warframe 助手"]},
+                    {"key": "kind", "values": [str(kind)]},
+                    {"key": "page", "values": [str(page_norm)]},
+                    {"key": "hint", "values": ["使用下方按钮：上一页 / 下一页"]},
                 ],
             }
 
@@ -149,7 +149,8 @@ class QQOfficialWebhookPager:
         if msg_id:
             payload["msg_id"] = msg_id
 
-        payload["msg_seq"] = random.randint(1, 10000)
+            # msg_seq is used together with msg_id to deduplicate replies.
+            payload["msg_seq"] = random.randint(1, 10000)
 
         try:
             if isinstance(source, GroupMessage):
@@ -258,11 +259,12 @@ class QQOfficialWebhookPager:
             "msg_type": 2,
             "markdown": markdown,
             "keyboard": {"id": self._keyboard_template_id},
-            "msg_seq": random.randint(1, 10000),
         }
 
         if msg_id:
             payload["msg_id"] = msg_id
+
+            payload["msg_seq"] = random.randint(1, 10000)
 
         route = None
         group_openid = getattr(interaction, "group_openid", None)
@@ -368,11 +370,12 @@ class QQOfficialWebhookPager:
             "content": " ",
             "msg_type": 2,
             "markdown": markdown,
-            "msg_seq": random.randint(1, 10000),
         }
 
         if msg_id:
             payload["msg_id"] = msg_id
+
+            payload["msg_seq"] = random.randint(1, 10000)
 
         try:
             if isinstance(source, GroupMessage):
@@ -514,11 +517,12 @@ class QQOfficialWebhookPager:
             "content": " ",
             "msg_type": 2,
             "markdown": markdown,
-            "msg_seq": random.randint(1, 10000),
         }
 
         if msg_id:
             payload["msg_id"] = msg_id
+
+            payload["msg_seq"] = random.randint(1, 10000)
 
         route = None
         group_openid = getattr(interaction, "group_openid", None)
