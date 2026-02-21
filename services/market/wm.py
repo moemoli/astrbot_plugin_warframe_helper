@@ -105,6 +105,11 @@ async def cmd_wm(
     page = 1
 
     # Cache paging context (used by /wfp prev|next and QQ button paging)
+    reply_msg_id = None
+    try:
+        reply_msg_id = getattr(getattr(event, "message_obj", None), "message_id", None)
+    except Exception:
+        reply_msg_id = None
     pager_cache.put(
         event=event,
         state={
@@ -115,6 +120,7 @@ async def cmd_wm(
             "order_type": order_type,
             "language": language,
             "item": item,
+            "reply_msg_id": str(reply_msg_id) if reply_msg_id else "",
         },
     )
 

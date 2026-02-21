@@ -132,6 +132,14 @@ async def handle_qq_interaction_create(
         )
         return
 
+    # Prefer the msg_id of the original user command (stored when /wm or /wmr ran).
+    try:
+        cached_reply = str(state.get("reply_msg_id") or "").strip()
+        if cached_reply:
+            reply_to_msg_id = cached_reply
+    except Exception:
+        pass
+
     kind = str(state.get("kind") or "").strip().lower()
     page = int(state.get("page") or 1)
     limit = max(1, min(int(state.get("limit") or 10), 20))

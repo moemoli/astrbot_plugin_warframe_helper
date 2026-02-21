@@ -395,6 +395,9 @@ async def cmd_wmr(
             "negative_required": bool(negative_required),
             "mastery_rank_min": mastery_rank_min,
             "polarity": polarity,
+            "reply_msg_id": str(
+                getattr(getattr(event, "message_obj", None), "message_id", None) or ""
+            ),
         },
     )
 

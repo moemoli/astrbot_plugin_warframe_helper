@@ -78,6 +78,8 @@ class QQOfficialWebhookPager:
         if not image_url:
             return False
 
+        size = self._get_image_size(image_path)
+        image_w, image_h = size if size else (1280, 720)
         image_markdown = self._build_markdown_image(image_url, image_path=image_path)
 
         return await self._send_markdown_keyboard(
@@ -87,6 +89,8 @@ class QQOfficialWebhookPager:
             page=page,
             hint=hint,
             image_url=image_url,
+            image_width=image_w,
+            image_height=image_h,
             image_markdown=image_markdown,
         )
 
@@ -118,6 +122,8 @@ class QQOfficialWebhookPager:
         if not image_url:
             return False
 
+        size = self._get_image_size(image_path)
+        image_w, image_h = size if size else (1280, 720)
         image_markdown = self._build_markdown_image(image_url, image_path=image_path)
 
         return await self._send_markdown_keyboard_for_interaction(
@@ -128,6 +134,8 @@ class QQOfficialWebhookPager:
             page=page,
             hint=hint,
             image_url=image_url,
+            image_width=image_w,
+            image_height=image_h,
             image_markdown=image_markdown,
             reply_to_msg_id=reply_to_msg_id,
         )
@@ -159,7 +167,7 @@ class QQOfficialWebhookPager:
         width, height = size
         # QQ Markdown supports setting image size via alt-text fragments.
         # Use the original image dimensions to avoid aspect-ratio stretching.
-        return f"![result#{width}px #{height}px]({url})"
+        return f"![result #{width}px #{height}px]({url})"
 
     async def _send_markdown_keyboard(
         self,
@@ -170,6 +178,8 @@ class QQOfficialWebhookPager:
         page: int,
         hint: str,
         image_url: str,
+        image_width: int,
+        image_height: int,
         image_markdown: str,
     ) -> bool:
         """Low-level send: markdown + keyboard (event path)."""
@@ -199,6 +209,8 @@ class QQOfficialWebhookPager:
                     {"key": "page", "values": [str(page_norm)]},
                     {"key": "hint", "values": [str(hint)]},
                     {"key": "image", "values": [str(image_url)]},
+                    {"key": "image_w", "values": [str(max(1, int(image_width)))]},
+                    {"key": "image_h", "values": [str(max(1, int(image_height)))]},
                 ],
             }
 
@@ -268,6 +280,8 @@ class QQOfficialWebhookPager:
                     page=page_norm,
                     hint=hint,
                     image_url=image_url,
+                    image_width=image_width,
+                    image_height=image_height,
                     image_markdown=image_markdown,
                 )
             else:
@@ -303,6 +317,8 @@ class QQOfficialWebhookPager:
         page: int,
         hint: str,
         image_url: str,
+        image_width: int,
+        image_height: int,
         image_markdown: str,
         reply_to_msg_id: str | None = None,
     ) -> bool:
@@ -322,6 +338,8 @@ class QQOfficialWebhookPager:
                     {"key": "page", "values": [str(page_norm)]},
                     {"key": "hint", "values": [str(hint)]},
                     {"key": "image", "values": [str(image_url)]},
+                    {"key": "image_w", "values": [str(max(1, int(image_width)))]},
+                    {"key": "image_h", "values": [str(max(1, int(image_height)))]},
                 ],
             }
 
