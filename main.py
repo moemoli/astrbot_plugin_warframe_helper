@@ -72,36 +72,78 @@ class WarframeHelperPlugin(Star):
         # /wm, /wmr pagination cache for QQ official webhook button paging.
         self._pager_cache = EventScopedTTLCache(ttl_sec=10 * 60)
 
-        # QQ official webhook keyboard template id (message buttons).
-        # Note: QQ button templates do NOT support variables.
-        try:
-            cfg_val = (
-                self.config.get("qq_official_webhook_pager_keyboard_template_id")
-                if self.config
-                else None
-            )
-        except Exception:
-            cfg_val = None
+        def _pick_qq_webhook_template_item(conf_val: object) -> dict | None:
+            if not isinstance(conf_val, list):
+                return None
+            for item in conf_val:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("__template_key") or "") == "paging_md_buttons":
+                    return item
+            for item in conf_val:
+                if isinstance(item, dict):
+                    return item
+            return None
 
-        qq_tpl = (
-            str(cfg_val or "").strip() or QQ_OFFICIAL_WEBHOOK_PAGER_TEMPLATE_ID_DEFAULT
+        merged = _pick_qq_webhook_template_item(
+            (self.config or {}).get("qq_official_webhook")
         )
 
+        # Backward-compatible fallbacks (deprecated keys are invisible in schema).
+        old_enable = bool(
+            (self.config or {}).get("qq_official_webhook_enable_markdown_reply")
+        )
+        old_keyboard = str(
+            (self.config or {}).get("qq_official_webhook_pager_keyboard_template_id")
+            or ""
+        ).strip()
+        old_markdown = str(
+            (self.config or {}).get("qq_official_webhook_markdown_template_id") or ""
+        ).strip()
+
+        enable_md = bool(
+            (merged or {}).get("enable_markdown_reply")
+            if isinstance(merged, dict)
+            else old_enable
+        )
+        keyboard_tpl = str(
+            (merged or {}).get("pager_keyboard_template_id")
+            if isinstance(merged, dict)
+            else old_keyboard
+        ).strip()
+        markdown_tpl = str(
+            (merged or {}).get("markdown_template_id")
+            if isinstance(merged, dict)
+            else old_markdown
+        ).strip()
+
+        # Auto-migrate old values into the merged config if needed.
         try:
-            md_tpl = (
-                self.config.get("qq_official_webhook_markdown_template_id")
-                if self.config
-                else None
-            )
+            if (
+                self.config is not None
+                and merged is None
+                and (old_enable or old_keyboard or old_markdown)
+            ):
+                self.config["qq_official_webhook"] = [
+                    {
+                        "__template_key": "paging_md_buttons",
+                        "enable_markdown_reply": old_enable,
+                        "pager_keyboard_template_id": old_keyboard,
+                        "markdown_template_id": old_markdown,
+                    }
+                ]
+                self.config.save_config()
         except Exception:
-            md_tpl = None
+            pass
+
+        # QQ official webhook keyboard template id (message buttons).
+        # Note: QQ button templates do NOT support variables.
+        qq_tpl = keyboard_tpl or QQ_OFFICIAL_WEBHOOK_PAGER_TEMPLATE_ID_DEFAULT
 
         self._qq_pager = QQOfficialWebhookPager(
             keyboard_template_id=qq_tpl,
-            markdown_template_id=str(md_tpl or "").strip(),
-            enable_markdown_reply=bool(
-                (self.config or {}).get("qq_official_webhook_enable_markdown_reply")
-            ),
+            markdown_template_id=markdown_tpl,
+            enable_markdown_reply=enable_md,
         )
 
         self._qq_pager.set_interaction_handler(self._on_qq_interaction_create)
