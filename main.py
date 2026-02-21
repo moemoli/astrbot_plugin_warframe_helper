@@ -1,4 +1,5 @@
 import json
+import random
 import re
 import time
 from typing import cast
@@ -65,8 +66,130 @@ class WarframeHelperPlugin(Star):
         self._wm_pick_cache: dict[str, dict] = {}
         self._wm_pick_cache_ttl_sec: float = 8 * 60
 
+        # /wm, /wmr pagination cache for QQ official webhook button paging.
+        # key = unified_origin + sender_id
+        self._pager_cache: dict[str, dict] = {}
+        self._pager_cache_ttl_sec: float = 10 * 60
+
+        # QQ official webhook keyboard template id (message buttons).
+        # Note: QQ button templates do NOT support variables.
+        self._qq_official_webhook_pager_keyboard_template_id: str = (
+            str(
+                (self.config.get("qq_official_webhook_pager_keyboard_template_id") if self.config else "")
+                or ""
+            ).strip()
+        )
+
     def _wm_cache_key(self, event: AstrMessageEvent) -> str:
         return f"{event.unified_msg_origin}|{event.get_sender_id()}"
+
+    def _pager_cache_key(self, event: AstrMessageEvent) -> str:
+        return f"{event.unified_msg_origin}|{event.get_sender_id()}"
+
+    def _pager_put_cache(self, *, event: AstrMessageEvent, state: dict) -> None:
+        try:
+            state = dict(state or {})
+            state["ts"] = time.time()
+            self._pager_cache[self._pager_cache_key(event)] = state
+        except Exception:
+            return
+
+    def _pager_get_cache(self, event: AstrMessageEvent) -> dict | None:
+        rec = self._pager_cache.get(self._pager_cache_key(event))
+        if not isinstance(rec, dict):
+            return None
+        ts = rec.get("ts")
+        if not isinstance(ts, (int, float)):
+            return None
+        if (time.time() - float(ts)) > self._pager_cache_ttl_sec:
+            return None
+        return rec
+
+    def _is_qq_official_webhook(self, event: AstrMessageEvent) -> bool:
+        try:
+            return event.get_platform_name() == "qq_official_webhook"
+        except Exception:
+            return False
+
+    async def _qq_official_webhook_send_pager_keyboard(
+        self,
+        event: AstrMessageEvent,
+        *,
+        kind: str,
+        page: int,
+    ) -> None:
+        """Send a markdown message with a keyboard template (buttons) on QQ official webhook.
+
+        This bypasses AstrBot's generic send path, so it does not affect other platforms.
+        """
+
+        if not self._is_qq_official_webhook(event):
+            return
+        template_id = self._qq_official_webhook_pager_keyboard_template_id
+        if not template_id:
+            return
+
+        bot = getattr(event, "bot", None)
+        if not bot or not getattr(bot, "api", None):
+            return
+
+        try:
+            import botpy
+            from botpy.http import Route
+        except Exception:
+            return
+
+        source = getattr(event.message_obj, "raw_message", None)
+
+        # Buttons require markdown content (cannot send keyboard-only).
+        markdown_text = f"翻页：{kind} 第{max(1, int(page))}页\n\n使用下方按钮上一页/下一页"
+        payload: dict = {
+            "msg_type": 2,
+            "markdown": {"content": markdown_text},
+            "keyboard": {"id": template_id},
+            "msg_id": getattr(event.message_obj, "message_id", None),
+        }
+
+        # For group/c2c replies, msg_seq is used to avoid duplicate send.
+        payload["msg_seq"] = random.randint(1, 10000)
+
+        route = None
+        try:
+            if isinstance(source, botpy.message.GroupMessage):
+                group_openid = getattr(source, "group_openid", None)
+                if not group_openid:
+                    return
+                route = Route(
+                    "POST",
+                    "/v2/groups/{group_openid}/messages",
+                    group_openid=group_openid,
+                )
+            elif isinstance(source, botpy.message.C2CMessage):
+                openid = getattr(getattr(source, "author", None), "user_openid", None)
+                if not openid:
+                    return
+                route = Route("POST", "/v2/users/{openid}/messages", openid=openid)
+            elif isinstance(source, botpy.message.Message):
+                channel_id = getattr(source, "channel_id", None)
+                if not channel_id:
+                    return
+                route = Route(
+                    "POST",
+                    "/channels/{channel_id}/messages",
+                    channel_id=channel_id,
+                )
+            elif isinstance(source, botpy.message.DirectMessage):
+                guild_id = getattr(source, "guild_id", None)
+                if not guild_id:
+                    return
+                route = Route("POST", "/dms/{guild_id}/messages", guild_id=guild_id)
+            else:
+                return
+
+            await bot.api._http.request(route, json=payload)
+        except Exception as exc:
+            logger.warning(f"QQ pager keyboard send failed: {exc!s}")
+            return
 
     def _wm_put_pick_cache(
         self,
@@ -424,7 +547,9 @@ class WarframeHelperPlugin(Star):
             ),
         )
         limit = max(1, min(int(limit), 20))
-        top = filtered[:limit]
+        page = 1
+        offset = (page - 1) * limit
+        top = filtered[offset : offset + limit]
 
         action_cn = "收购" if order_type == "buy" else "出售"
         if not top:
@@ -432,6 +557,20 @@ class WarframeHelperPlugin(Star):
                 f"{item.name}（{platform_norm}）暂无可用{action_cn}订单。",
             )
             return
+
+        # Cache paging context (used by /wfp prev|next)
+        self._pager_put_cache(
+            event=event,
+            state={
+                "kind": "wm",
+                "page": page,
+                "limit": limit,
+                "platform": platform_norm,
+                "order_type": order_type,
+                "language": language,
+                "item": item,
+            },
+        )
 
         # 缓存本次 TopN（用于后续“回复图片发数字”）
         self._wm_put_pick_cache(
@@ -457,6 +596,20 @@ class WarframeHelperPlugin(Star):
             limit=limit,
         )
         if rendered:
+            # QQ official webhook: send image + a markdown message with pager buttons.
+            if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
+                try:
+                    await event.send(event.image_result(rendered.path))
+                    await self._qq_official_webhook_send_pager_keyboard(
+                        event,
+                        kind="/wm",
+                        page=page,
+                    )
+                except Exception:
+                    # Fallback to default yield path
+                    yield event.image_result(rendered.path)
+                return
+
             yield event.image_result(rendered.path)
             return
 
@@ -469,6 +622,17 @@ class WarframeHelperPlugin(Star):
             name = o.ingame_name or "unknown"
             lines.append(f"{idx}. {o.platinum}p  {status}  {name}")
         yield event.plain_result("\n".join(lines))
+
+        # If qq_official_webhook and template configured, still try to append pager buttons.
+        if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
+            try:
+                await self._qq_official_webhook_send_pager_keyboard(
+                    event,
+                    kind="/wm",
+                    page=page,
+                )
+            except Exception:
+                pass
 
     @filter.command("wmr")
     async def wmr(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
@@ -878,31 +1042,24 @@ class WarframeHelperPlugin(Star):
             return score
 
         # Two-stage sorting:
-        # 1) Pick top N auctions by "fit to parameters".
-        #    If there are ties on the N-th score, break ties by online status & price.
-        # 2) Within the picked N, sort by online status & price for display.
+        # 1) Rank all auctions by "fit to parameters" (stable tie-breakers).
+        # 2) Pick one page (page size = limit) from the ranking.
+        # 3) Within the picked page, sort by online status & price for display.
         limit = max(1, min(int(limit), 20))
+        page = 1
+        offset = (page - 1) * limit
 
         scored: list[tuple[int, object]] = [(stat_fit_score(a), a) for a in filtered]
-        scored.sort(key=lambda x: -x[0])
-
-        if len(scored) <= limit:
-            picked = [a for _, a in scored]
-        else:
-            cutoff_score = scored[limit - 1][0]
-
-            higher: list[object] = [a for s, a in scored if s > cutoff_score]
-            equal: list[object] = [a for s, a in scored if s == cutoff_score]
-
-            need = max(0, limit - len(higher))
-            equal.sort(
-                key=lambda a: (
-                    presence_rank(getattr(a, "owner_status", None)),
-                    int(getattr(a, "buyout_price", 0) or 0),
-                    (getattr(a, "owner_name", "") or ""),
-                )
+        scored.sort(
+            key=lambda x: (
+                -int(x[0]),
+                presence_rank(getattr(x[1], "owner_status", None)),
+                int(getattr(x[1], "buyout_price", 0) or 0),
+                (getattr(x[1], "auction_id", "") or ""),
             )
-            picked = higher + equal[:need]
+        )
+        ranked = [a for _, a in scored]
+        picked = ranked[offset : offset + limit]
 
         picked.sort(
             key=lambda a: (
@@ -915,6 +1072,25 @@ class WarframeHelperPlugin(Star):
         if not top:
             yield event.plain_result("没有符合条件的一口价紫卡拍卖。")
             return
+
+        # Cache paging context (used by /wfp prev|next)
+        self._pager_put_cache(
+            event=event,
+            state={
+                "kind": "wmr",
+                "page": page,
+                "limit": limit,
+                "platform": platform_norm,
+                "language": language,
+                "weapon_query": weapon_query,
+                "weapon": weapon,
+                "positive_stats": list(positive_stats),
+                "negative_stats": list(negative_stats),
+                "negative_required": bool(negative_required),
+                "mastery_rank_min": mastery_rank_min,
+                "polarity": polarity,
+            },
+        )
 
         # summary
         def fmt_stats(stats: list[str]) -> str:
@@ -942,6 +1118,18 @@ class WarframeHelperPlugin(Star):
             limit=len(top),
         )
         if rendered:
+            if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
+                try:
+                    await event.send(event.image_result(rendered.path))
+                    await self._qq_official_webhook_send_pager_keyboard(
+                        event,
+                        kind="/wmr",
+                        page=page,
+                    )
+                except Exception:
+                    yield event.image_result(rendered.path)
+                return
+
             yield event.image_result(rendered.path)
             return
 
@@ -958,6 +1146,311 @@ class WarframeHelperPlugin(Star):
                 f"{idx}. {a.buyout_price}p  {status}  {name}  MR{mr}  {pol}  洗练{rr}"
             )
         yield event.plain_result("\n".join(lines))
+
+        if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
+            try:
+                await self._qq_official_webhook_send_pager_keyboard(
+                    event,
+                    kind="/wmr",
+                    page=page,
+                )
+            except Exception:
+                pass
+
+    @filter.command("wfp")
+    async def wf_page(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
+        """Pagination helper for /wm and /wmr.
+
+        Usage:
+        - /wfp prev
+        - /wfp next
+
+        Designed to be used by QQ official webhook "command" buttons.
+        """
+
+        text = str(args).strip().lower()
+        direction = "next"
+        if text in {"prev", "previous", "上一页", "上", "up"}:
+            direction = "prev"
+        elif text in {"next", "下一页", "下", "down"}:
+            direction = "next"
+
+        state = self._pager_get_cache(event)
+        if not state:
+            yield event.plain_result("没有可翻页的记录，请先执行 /wm 或 /wmr。")
+            return
+
+        kind = str(state.get("kind") or "").strip().lower()
+        page = int(state.get("page") or 1)
+        limit = int(state.get("limit") or 10)
+        limit = max(1, min(int(limit), 20))
+
+        if direction == "prev":
+            if page <= 1:
+                yield event.plain_result("已经是第一页。")
+                return
+            page -= 1
+        else:
+            page += 1
+
+        state["page"] = page
+        state["limit"] = limit
+        self._pager_put_cache(event=event, state=state)
+
+        if kind == "wm":
+            item = state.get("item")
+            platform_norm = str(state.get("platform") or "pc")
+            order_type = str(state.get("order_type") or "sell")
+            language = str(state.get("language") or "zh")
+            if not item or not getattr(item, "item_id", None):
+                yield event.plain_result("分页信息已过期，请重新执行 /wm。")
+                return
+
+            orders = await self.market_client.fetch_orders_by_item_id(item.item_id)
+            if not orders:
+                yield event.plain_result("未获取到订单（可能是网络限制或接口不可达）。")
+                return
+
+            filtered = [
+                o
+                for o in orders
+                if o.visible
+                and o.order_type == order_type
+                and (o.platform or "").lower() == platform_norm
+            ]
+            filtered.sort(
+                key=lambda o: (
+                    presence_rank(o.status),
+                    o.platinum,
+                    (o.ingame_name or ""),
+                )
+            )
+            offset = (page - 1) * limit
+            top = filtered[offset : offset + limit]
+            if not top:
+                yield event.plain_result("没有更多结果了。")
+                return
+
+            action_cn = "收购" if order_type == "buy" else "出售"
+            self._wm_put_pick_cache(
+                event=event,
+                item_name_en=getattr(item, "name", "") or "",
+                order_type=order_type,
+                platform=platform_norm,
+                rows=[
+                    {
+                        "name": (o.ingame_name or "").strip(),
+                        "platinum": int(o.platinum),
+                    }
+                    for o in top
+                ],
+            )
+
+            rendered = await render_wm_orders_image_to_file(
+                item=item,
+                orders=top,
+                platform=platform_norm,
+                action_cn=action_cn,
+                language=language,
+                limit=limit,
+            )
+            if rendered:
+                if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
+                    await event.send(event.image_result(rendered.path))
+                    await self._qq_official_webhook_send_pager_keyboard(
+                        event,
+                        kind="/wm",
+                        page=page,
+                    )
+                    return
+                yield event.image_result(rendered.path)
+                return
+
+            lines = [
+                f"{item.get_localized_name(language)}（{platform_norm}）{action_cn} 第{page}页："
+            ]
+            for idx, o in enumerate(top, start=1):
+                status = o.status or "unknown"
+                name = o.ingame_name or "unknown"
+                lines.append(f"{idx}. {o.platinum}p  {status}  {name}")
+            yield event.plain_result("\n".join(lines))
+            if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
+                await self._qq_official_webhook_send_pager_keyboard(
+                    event,
+                    kind="/wm",
+                    page=page,
+                )
+            return
+
+        if kind == "wmr":
+            weapon = state.get("weapon")
+            if not weapon or not getattr(weapon, "url_name", None):
+                yield event.plain_result("分页信息已过期，请重新执行 /wmr。")
+                return
+
+            platform_norm = str(state.get("platform") or "pc")
+            language = str(state.get("language") or "zh")
+            weapon_query = str(state.get("weapon_query") or "")
+            positive_stats = [
+                str(x).strip() for x in (state.get("positive_stats") or []) if str(x).strip()
+            ]
+            negative_stats = [
+                str(x).strip() for x in (state.get("negative_stats") or []) if str(x).strip()
+            ]
+            negative_required = bool(state.get("negative_required") or False)
+            mastery_rank_min = state.get("mastery_rank_min")
+            if mastery_rank_min is not None:
+                try:
+                    mastery_rank_min = int(mastery_rank_min)
+                except Exception:
+                    mastery_rank_min = None
+            polarity = state.get("polarity")
+            polarity = str(polarity).strip().lower() if polarity else None
+
+            auctions = await self.market_client.fetch_riven_auctions(
+                weapon.url_name,
+                platform=platform_norm,
+                positive_stats=positive_stats,
+                negative_stats=negative_stats,
+                mastery_rank_min=mastery_rank_min,
+                polarity=polarity,
+                buyout_policy="direct",
+            )
+            if not auctions:
+                yield event.plain_result(
+                    "未获取到紫卡拍卖数据（可能是网络限制或接口不可达）。"
+                )
+                return
+
+            filtered = [
+                a
+                for a in auctions
+                if a.visible
+                and (not a.closed)
+                and a.is_direct_sell
+                and (a.platform or "").lower() == platform_norm
+            ]
+            if negative_required and not negative_stats:
+                filtered = [
+                    a for a in filtered if any((not x.positive) for x in a.attributes)
+                ]
+
+            req_pos = set(uniq_lower(positive_stats))
+            req_neg = set(uniq_lower(negative_stats))
+
+            def stat_fit_score(a) -> int:
+                a_pos = {x.url_name for x in a.attributes if x.positive}
+                a_neg = {x.url_name for x in a.attributes if not x.positive}
+
+                score = 0
+                score += 10 * len(req_pos & a_pos)
+                score += 10 * len(req_neg & a_neg)
+                score -= 50 * len(req_pos - a_pos)
+                score -= 50 * len(req_neg - a_neg)
+
+                if negative_required and not a_neg:
+                    score -= 20
+
+                if req_pos:
+                    score -= len(a_pos - req_pos)
+                if req_neg:
+                    score -= len(a_neg - req_neg)
+
+                if polarity:
+                    if (a.polarity or "").strip().lower() == polarity.strip().lower():
+                        score += 5
+                    else:
+                        score -= 5
+
+                if mastery_rank_min is not None and a.mastery_level is not None:
+                    score -= abs(int(a.mastery_level) - int(mastery_rank_min))
+
+                return score
+
+            scored: list[tuple[int, object]] = [(stat_fit_score(a), a) for a in filtered]
+            scored.sort(
+                key=lambda x: (
+                    -int(x[0]),
+                    presence_rank(getattr(x[1], "owner_status", None)),
+                    int(getattr(x[1], "buyout_price", 0) or 0),
+                    (getattr(x[1], "auction_id", "") or ""),
+                )
+            )
+            ranked = [a for _, a in scored]
+            offset = (page - 1) * limit
+            picked = ranked[offset : offset + limit]
+            if not picked:
+                yield event.plain_result("没有更多结果了。")
+                return
+
+            picked.sort(
+                key=lambda a: (
+                    presence_rank(getattr(a, "owner_status", None)),
+                    int(getattr(a, "buyout_price", 0) or 0),
+                    (getattr(a, "owner_name", "") or ""),
+                )
+            )
+            top = cast(list, picked)
+
+            def fmt_stats(stats: list[str]) -> str:
+                return "+".join([RIVEN_STAT_CN.get(s, s) for s in stats])
+
+            parts: list[str] = []
+            if positive_stats:
+                parts.append("正:" + fmt_stats(positive_stats))
+            if negative_stats:
+                parts.append("负:" + fmt_stats(negative_stats))
+            elif negative_required:
+                parts.append("负:任意")
+            if mastery_rank_min is not None:
+                parts.append(f"MR≥{mastery_rank_min}")
+            if polarity:
+                parts.append("极性" + RIVEN_POLARITY_CN.get(polarity, polarity))
+            summary = " ".join(parts) if parts else "(无筛选)"
+
+            rendered = await render_wmr_auctions_image_to_file(
+                weapon=weapon,
+                weapon_display_name=("" if language.startswith("en") else weapon_query),
+                auctions=top,
+                platform=platform_norm,
+                summary=summary,
+                limit=len(top),
+            )
+            if rendered:
+                if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
+                    await event.send(event.image_result(rendered.path))
+                    await self._qq_official_webhook_send_pager_keyboard(
+                        event,
+                        kind="/wmr",
+                        page=page,
+                    )
+                    return
+                yield event.image_result(rendered.path)
+                return
+
+            fallback_name = (
+                weapon.item_name if language.startswith("en") else (weapon_query or weapon.item_name)
+            )
+            lines = [f"紫卡 {fallback_name}（{platform_norm}）{summary} 第{page}页："]
+            for idx, a in enumerate(top, start=1):
+                name = a.owner_name or "unknown"
+                status = a.owner_status or "unknown"
+                pol = a.polarity or "?"
+                mr = a.mastery_level if a.mastery_level is not None else "?"
+                rr = a.re_rolls if a.re_rolls is not None else "?"
+                lines.append(
+                    f"{idx}. {a.buyout_price}p  {status}  {name}  MR{mr}  {pol}  洗练{rr}"
+                )
+            yield event.plain_result("\n".join(lines))
+            if self._is_qq_official_webhook(event) and self._qq_official_webhook_pager_keyboard_template_id:
+                await self._qq_official_webhook_send_pager_keyboard(
+                    event,
+                    kind="/wmr",
+                    page=page,
+                )
+            return
+
+        yield event.plain_result("当前记录不支持翻页，请重新执行 /wm 或 /wmr。")
 
     @filter.regex(r"^\d+$")
     async def wm_pick_number(self, event: AstrMessageEvent):
