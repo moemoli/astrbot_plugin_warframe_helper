@@ -1,0 +1,5 @@
+# Only dependencies required by astrbot_plugin_warframe_helper itself.
+# (AstrBot core dependencies are not listed here.)
+
+aiohttp
+Pillow
