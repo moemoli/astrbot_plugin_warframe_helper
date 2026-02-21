@@ -119,10 +119,10 @@ class QQOfficialWebhookPager:
             return {
                 "custom_template_id": self._markdown_template_id,
                 "params": [
-                    {"key": "title", "values": ["Warframe 助手"]},
-                    {"key": "kind", "values": [str(kind)]},
-                    {"key": "page", "values": [str(page_norm)]},
-                    {"key": "hint", "values": ["使用下方按钮：上一页 / 下一页"]},
+                    {"key": "title", "values": "Warframe 助手"},
+                    {"key": "kind", "values": str(kind)},
+                    {"key": "page", "values": str(page_norm)},
+                    {"key": "hint", "values": "使用下方按钮：上一页 / 下一页"},
                 ],
             }
 
@@ -138,6 +138,9 @@ class QQOfficialWebhookPager:
         msg_id = getattr(event.message_obj, "message_id", None)
 
         payload: dict = {
+            # QQ v2 send message schema may require `content` even for markdown.
+            # Use a single space so it does not visibly affect the message.
+            "content": " ",
             "msg_type": 2,
             "markdown": markdown,
             "keyboard": {"id": self._keyboard_template_id},
@@ -251,6 +254,7 @@ class QQOfficialWebhookPager:
         msg_id = getattr(resolved, "message_id", None)
 
         payload: dict = {
+            "content": " ",
             "msg_type": 2,
             "markdown": markdown,
             "keyboard": {"id": self._keyboard_template_id},
@@ -361,6 +365,7 @@ class QQOfficialWebhookPager:
         msg_id = getattr(event.message_obj, "message_id", None)
 
         payload: dict = {
+            "content": " ",
             "msg_type": 2,
             "markdown": markdown,
             "msg_seq": random.randint(1, 10000),
@@ -506,6 +511,7 @@ class QQOfficialWebhookPager:
         msg_id = getattr(resolved, "message_id", None)
 
         payload: dict = {
+            "content": " ",
             "msg_type": 2,
             "markdown": markdown,
             "msg_seq": random.randint(1, 10000),
