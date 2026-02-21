@@ -1417,7 +1417,215 @@ class WarframeHelperPlugin(Star):
 
         yield event.plain_result("\n".join(lines))
 
-    @filter.command("夜灵平原", alias={"平原", "希图斯", "cetus", "poe"})
+    @filter.command("平原")
+    async def wf_plains(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
+        """查询各开放世界平原的当前状态。
+
+        - 无参数：列出所有平原状态（图片输出）
+        - 带参数：查询指定平原，例如：/平原 希图斯
+        """
+
+        event.should_call_llm(False)
+
+        raw_tokens = split_tokens(str(args))
+        platform_norm = self._worldstate_platform_from_tokens(raw_tokens)
+
+        def norm(text: str) -> str:
+            return re.sub(r"\s+", "", str(text).strip().lower())
+
+        # Strip platform tokens from query tokens.
+        platform_tokens = {
+            norm(k) for k in WORLDSTATE_PLATFORM_ALIASES.keys() if k
+        } | {norm(v) for v in WORLDSTATE_PLATFORM_ALIASES.values() if v}
+        query_tokens = [t for t in raw_tokens if norm(t) not in platform_tokens]
+        query = "".join([t.strip() for t in query_tokens if t.strip()])
+        qn = norm(query)
+
+        plains: list[tuple[str, set[str]]] = [
+            ("夜灵平原", {"夜灵平原", "希图斯", "cetus", "poe"}),
+            (
+                "奥布山谷",
+                {"奥布山谷", "金星平原", "福尔图娜", "vallis", "orb", "orbvallis", "fortuna"},
+            ),
+            ("魔胎之境", {"魔胎之境", "魔胎", "cambion"}),
+        ]
+
+        def match_plain(name: str, aliases: set[str], q: str) -> bool:
+            if not q:
+                return False
+            if q in norm(name):
+                return True
+            for a in aliases:
+                if q in norm(a):
+                    return True
+            return False
+
+        if qn:
+            matched = [p for p in plains if match_plain(p[0], p[1], qn)]
+            if not matched:
+                yield event.plain_result(
+                    "未识别平原名称。用法：/平原 [希图斯/福尔图娜/魔胎] [平台]；不带参数列出全部平原状态。"
+                )
+                return
+            if len(matched) > 1:
+                names = "、".join([m[0] for m in matched])
+                yield event.plain_result(
+                    f"匹配到多个平原：{names}。请把参数写得更具体一些。"
+                )
+                return
+
+            plain_name = matched[0][0]
+            if plain_name == "夜灵平原":
+                info = await self.worldstate_client.fetch_cetus_cycle(
+                    platform=platform_norm, language="zh"
+                )
+                if info is None:
+                    yield event.plain_result(
+                        "未获取到夜灵平原信息（可能是网络限制或接口不可达）。"
+                    )
+                    return
+                state_cn = info.state or (
+                    "白天" if info.is_day else ("夜晚" if info.is_day is False else "未知")
+                )
+                left = info.time_left or info.eta
+                yield await self._render_worldstate_cycle(
+                    event,
+                    title="夜灵平原",
+                    platform_norm=platform_norm,
+                    state_cn=state_cn,
+                    left=left,
+                    start_time=getattr(info, "start_time", None),
+                    end_time=getattr(info, "end_time", None),
+                    accent=(20, 184, 166, 255),
+                    plain_prefix="夜灵平原",
+                )
+                return
+
+            if plain_name == "奥布山谷":
+                info = await self.worldstate_client.fetch_vallis_cycle(
+                    platform=platform_norm, language="zh"
+                )
+                if info is None:
+                    yield event.plain_result(
+                        "未获取到奥布山谷信息（可能是网络限制或接口不可达）。"
+                    )
+                    return
+                state_cn = info.state or (
+                    "温暖" if info.is_warm else ("寒冷" if info.is_warm is False else "未知")
+                )
+                left = info.time_left or info.eta
+                yield await self._render_worldstate_cycle(
+                    event,
+                    title="奥布山谷",
+                    platform_norm=platform_norm,
+                    state_cn=state_cn,
+                    left=left,
+                    start_time=getattr(info, "start_time", None),
+                    end_time=getattr(info, "end_time", None),
+                    accent=(20, 184, 166, 255),
+                    plain_prefix="奥布山谷",
+                )
+                return
+
+            # 魔胎之境
+            info = await self.worldstate_client.fetch_cambion_cycle(
+                platform=platform_norm, language="zh"
+            )
+            if info is None:
+                yield event.plain_result(
+                    "未获取到魔胎之境信息（可能是网络限制或接口不可达）。"
+                )
+                return
+            state_cn = info.active or info.state or "未知"
+            left = info.time_left or info.eta
+            yield await self._render_worldstate_cycle(
+                event,
+                title="魔胎之境",
+                platform_norm=platform_norm,
+                state_cn=state_cn,
+                left=left,
+                start_time=getattr(info, "start_time", None),
+                end_time=getattr(info, "end_time", None),
+                accent=(20, 184, 166, 255),
+                plain_prefix="魔胎之境",
+            )
+            return
+
+        # No query: list all plains.
+        try:
+            cetus = await self.worldstate_client.fetch_cetus_cycle(
+                platform=platform_norm, language="zh"
+            )
+        except Exception:
+            cetus = None
+
+        try:
+            vallis = await self.worldstate_client.fetch_vallis_cycle(
+                platform=platform_norm, language="zh"
+            )
+        except Exception:
+            vallis = None
+
+        try:
+            cambion = await self.worldstate_client.fetch_cambion_cycle(
+                platform=platform_norm, language="zh"
+            )
+        except Exception:
+            cambion = None
+
+        rows: list[WorldstateRow] = []
+        # 夜灵平原
+        if cetus is None:
+            rows.append(WorldstateRow(title="夜灵平原", subtitle="(获取失败)", right=None))
+        else:
+            state_cn = cetus.state or (
+                "白天" if cetus.is_day else ("夜晚" if cetus.is_day is False else "未知")
+            )
+            left = cetus.time_left or cetus.eta
+            rows.append(
+                WorldstateRow(title="夜灵平原", subtitle=f"当前：{state_cn}", right=f"剩余{left}")
+            )
+
+        # 奥布山谷
+        if vallis is None:
+            rows.append(WorldstateRow(title="奥布山谷", subtitle="(获取失败)", right=None))
+        else:
+            state_cn = vallis.state or (
+                "温暖" if vallis.is_warm else ("寒冷" if vallis.is_warm is False else "未知")
+            )
+            left = vallis.time_left or vallis.eta
+            rows.append(
+                WorldstateRow(title="奥布山谷", subtitle=f"当前：{state_cn}", right=f"剩余{left}")
+            )
+
+        # 魔胎之境
+        if cambion is None:
+            rows.append(WorldstateRow(title="魔胎之境", subtitle="(获取失败)", right=None))
+        else:
+            state_cn = cambion.active or cambion.state or "未知"
+            left = cambion.time_left or cambion.eta
+            rows.append(
+                WorldstateRow(title="魔胎之境", subtitle=f"当前：{state_cn}", right=f"剩余{left}")
+            )
+
+        rendered = await render_worldstate_rows_image_to_file(
+            title="平原状态",
+            header_lines=[f"平台：{platform_norm}"],
+            rows=rows,
+            accent=(20, 184, 166, 255),
+        )
+        if rendered:
+            yield event.image_result(rendered.path)
+            return
+
+        lines = [f"平原状态（{platform_norm}）："]
+        for r in rows:
+            right = f" {r.right}" if r.right else ""
+            sub = f" {r.subtitle}" if r.subtitle else ""
+            lines.append(f"- {r.title}{sub}{right}")
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("夜灵平原", alias={"希图斯", "cetus", "poe"})
     async def wf_cetus_cycle(
         self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()
     ):
