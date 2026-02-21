@@ -7,6 +7,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
 from PIL import Image, ImageDraw, ImageFont
 
 from astrbot.api import logger
@@ -42,7 +43,12 @@ def _parse_viewbox(svg_text: str) -> tuple[float, float, float, float] | None:
     if len(parts) != 4:
         return None
     try:
-        x, y, w, h = (float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
+        x, y, w, h = (
+            float(parts[0]),
+            float(parts[1]),
+            float(parts[2]),
+            float(parts[3]),
+        )
     except Exception:
         return None
     if w <= 0 or h <= 0:
@@ -197,9 +203,18 @@ def _svg_path_to_polygons(d: str) -> list[list[tuple[float, float]]]:
             continue
 
         if cmd in {"C", "c"}:
-            if i + 5 >= len(toks) or not all(isinstance(toks[i + k], float) for k in range(6)):
+            if i + 5 >= len(toks) or not all(
+                isinstance(toks[i + k], float) for k in range(6)
+            ):
                 break
-            x1, y1, x2, y2, x, y = (float(toks[i]), float(toks[i + 1]), float(toks[i + 2]), float(toks[i + 3]), float(toks[i + 4]), float(toks[i + 5]))
+            x1, y1, x2, y2, x, y = (
+                float(toks[i]),
+                float(toks[i + 1]),
+                float(toks[i + 2]),
+                float(toks[i + 3]),
+                float(toks[i + 4]),
+                float(toks[i + 5]),
+            )
             i += 6
             if cmd == "c":
                 x1 += cx
@@ -222,9 +237,16 @@ def _svg_path_to_polygons(d: str) -> list[list[tuple[float, float]]]:
             continue
 
         if cmd in {"S", "s"}:
-            if i + 3 >= len(toks) or not all(isinstance(toks[i + k], float) for k in range(4)):
+            if i + 3 >= len(toks) or not all(
+                isinstance(toks[i + k], float) for k in range(4)
+            ):
                 break
-            x2, y2, x, y = (float(toks[i]), float(toks[i + 1]), float(toks[i + 2]), float(toks[i + 3]))
+            x2, y2, x, y = (
+                float(toks[i]),
+                float(toks[i + 1]),
+                float(toks[i + 2]),
+                float(toks[i + 3]),
+            )
             i += 4
             if cmd == "s":
                 x2 += cx
@@ -295,8 +317,7 @@ def _rasterize_svg_paths_to_icon(svg_text: str, *, size: int) -> Image.Image | N
             if len(poly) < 3:
                 continue
             pts = [
-                (float(x) * scale + off_x, float(y) * scale + off_y)
-                for (x, y) in poly
+                (float(x) * scale + off_x, float(y) * scale + off_y) for (x, y) in poly
             ]
             try:
                 md.polygon(pts, fill=255)

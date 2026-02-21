@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from astrbot.api.event import AstrMessageEvent
 
-from ..clients.public_export_client import PublicExportClient
 from ..clients.drop_data_client import DropDataClient
+from ..clients.public_export_client import PublicExportClient
 from ..helpers import split_tokens
 from ..utils.text import normalize_compact, safe_relic_name
 
@@ -17,11 +17,15 @@ async def cmd_drops(
 ):
     arg_text = str(raw_args).strip()
     if not arg_text:
-        return event.plain_result("用法：/掉落 <物品> [数量<=30] 例如：/掉落 Neurodes 15")
+        return event.plain_result(
+            "用法：/掉落 <物品> [数量<=30] 例如：/掉落 Neurodes 15"
+        )
 
     tokens = split_tokens(arg_text)
     if not tokens:
-        return event.plain_result("用法：/掉落 <物品> [数量<=30] 例如：/掉落 Neurodes 15")
+        return event.plain_result(
+            "用法：/掉落 <物品> [数量<=30] 例如：/掉落 Neurodes 15"
+        )
 
     limit = 15
     if tokens and str(tokens[-1]).isdigit():
@@ -33,7 +37,9 @@ async def cmd_drops(
 
     query = " ".join([str(t).strip() for t in tokens if str(t).strip()]).strip()
     if not query:
-        return event.plain_result("用法：/掉落 <物品> [数量<=30] 例如：/掉落 Neurodes 15")
+        return event.plain_result(
+            "用法：/掉落 <物品> [数量<=30] 例如：/掉落 Neurodes 15"
+        )
 
     resolved_en: str | None = None
 
@@ -44,7 +50,9 @@ async def cmd_drops(
         )
         if candidates:
             resolved_en = candidates[0]
-            rows = await drop_data_client.search_drops(item_query=resolved_en, limit=limit)
+            rows = await drop_data_client.search_drops(
+                item_query=resolved_en, limit=limit
+            )
 
     if not rows:
         return event.plain_result(
@@ -128,9 +136,7 @@ async def cmd_relic(
 
     relic_name = safe_relic_name("".join(name_parts))
     if not relic_name:
-        return event.plain_result(
-            "未识别遗物名。示例：/遗物 古纪 A1  或  /遗物 Axi A1"
-        )
+        return event.plain_result("未识别遗物名。示例：/遗物 古纪 A1  或  /遗物 Axi A1")
 
     if tier is None:
         tiers = await drop_data_client.find_relic_tiers(relic_name)

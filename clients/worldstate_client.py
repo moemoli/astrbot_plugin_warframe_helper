@@ -647,7 +647,9 @@ class WarframeWorldstateClient:
                 node_u = m.get("node") if isinstance(m.get("node"), str) else ""
                 node = await self._node_name(node_u, language=language)
                 mt = self._mission_type_cn(
-                    m.get("missionType") if isinstance(m.get("missionType"), str) else ""
+                    m.get("missionType")
+                    if isinstance(m.get("missionType"), str)
+                    else ""
                 )
                 mod_raw = m.get("modifierType")
                 modifier = (
@@ -1142,11 +1144,15 @@ class WarframeWorldstateClient:
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                cat = row.get("Category") if isinstance(row.get("Category"), str) else ""
+                cat = (
+                    row.get("Category") if isinstance(row.get("Category"), str) else ""
+                )
                 arr = row.get("Choices")
                 if not isinstance(arr, list):
                     continue
-                picked = [str(x).strip() for x in arr if isinstance(x, str) and str(x).strip()]
+                picked = [
+                    str(x).strip() for x in arr if isinstance(x, str) and str(x).strip()
+                ]
                 if not picked:
                     continue
                 if cat == "EXC_NORMAL":
@@ -1158,6 +1164,21 @@ class WarframeWorldstateClient:
         day_start = server_dt.replace(hour=0, minute=0, second=0, microsecond=0)
         monday_start = day_start - timedelta(days=int(server_dt.weekday()))
         next_reset = monday_start + timedelta(days=7)
+
+        lang = (language or "zh").strip().lower() or "zh"
+        if lang.startswith("zh"):
+
+            async def _loc(items: list[str]) -> list[str]:
+                out: list[str] = []
+                for it in items:
+                    mapped = await self._public_export.translate_display_name(
+                        it, language=lang
+                    )
+                    out.append(mapped or it)
+                return out
+
+            normal = await _loc(normal)
+            steel = await _loc(steel)
 
         return DuviriCircuitRewardInfo(
             normal_choices=tuple(normal),

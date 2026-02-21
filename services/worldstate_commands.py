@@ -4,8 +4,9 @@ import re
 
 from astrbot.api.event import AstrMessageEvent
 
-from ..clients.worldstate_client import Platform, WarframeWorldstateClient
+from ..clients.worldstate_client import WarframeWorldstateClient
 from ..constants import WORLDSTATE_PLATFORM_ALIASES
+from ..helpers import split_tokens
 from ..renderers.worldstate_render import (
     WorldstateRow,
     render_worldstate_rows_image_to_file,
@@ -13,7 +14,6 @@ from ..renderers.worldstate_render import (
 from ..services.fissures import render_fissures_image, render_fissures_text
 from ..services.worldstate_views import render_worldstate_cycle
 from ..utils.platforms import eta_key, worldstate_platform_from_tokens
-from ..helpers import split_tokens
 
 
 def _normalize_compact(text: str) -> str:
@@ -216,7 +216,9 @@ async def cmd_void_trader(
     tokens = split_tokens(str(raw_args))
     platform_norm = worldstate_platform_from_tokens(tokens)
 
-    info = await worldstate_client.fetch_void_trader(platform=platform_norm, language="zh")
+    info = await worldstate_client.fetch_void_trader(
+        platform=platform_norm, language="zh"
+    )
     if info is None:
         return event.plain_result("未获取到奸商信息（可能是网络限制或接口不可达）。")
 
@@ -280,7 +282,9 @@ async def cmd_arbitration(
     tokens = split_tokens(str(raw_args))
     platform_norm = worldstate_platform_from_tokens(tokens)
 
-    info = await worldstate_client.fetch_arbitration(platform=platform_norm, language="zh")
+    info = await worldstate_client.fetch_arbitration(
+        platform=platform_norm, language="zh"
+    )
     if info is None:
         return event.plain_result("未获取到仲裁信息（可能是网络限制或接口不可达）。")
 
@@ -314,7 +318,9 @@ async def cmd_nightwave(
     tokens = split_tokens(str(raw_args))
     platform_norm = worldstate_platform_from_tokens(tokens)
 
-    info = await worldstate_client.fetch_nightwave(platform=platform_norm, language="zh")
+    info = await worldstate_client.fetch_nightwave(
+        platform=platform_norm, language="zh"
+    )
     if info is None:
         return event.plain_result("未获取到电波信息（可能是网络限制或接口不可达）。")
 
@@ -380,7 +386,9 @@ async def cmd_plains(
         _normalize_compact(k) for k in WORLDSTATE_PLATFORM_ALIASES.keys() if k
     } | {_normalize_compact(v) for v in WORLDSTATE_PLATFORM_ALIASES.values() if v}
 
-    query_tokens = [t for t in raw_tokens if _normalize_compact(t) not in platform_tokens]
+    query_tokens = [
+        t for t in raw_tokens if _normalize_compact(t) not in platform_tokens
+    ]
     query = "".join([str(t).strip() for t in query_tokens if str(t).strip()])
     qn = _normalize_compact(query)
 
@@ -420,7 +428,9 @@ async def cmd_plains(
             )
         if len(matched) > 1:
             names = "、".join([m[0] for m in matched])
-            return event.plain_result(f"匹配到多个平原：{names}。请把参数写得更具体一些。")
+            return event.plain_result(
+                f"匹配到多个平原：{names}。请把参数写得更具体一些。"
+            )
 
         plain_name = matched[0][0]
         if plain_name == "夜灵平原":
@@ -506,7 +516,9 @@ async def cmd_plains(
                     "未获取到奥布山谷信息（可能是网络限制或接口不可达）。"
                 )
             state_cn = info.state or (
-                "温暖" if info.is_warm else ("寒冷" if info.is_warm is False else "未知")
+                "温暖"
+                if info.is_warm
+                else ("寒冷" if info.is_warm is False else "未知")
             )
             left = info.time_left or info.eta
             return await render_worldstate_cycle(
@@ -525,7 +537,9 @@ async def cmd_plains(
             platform=platform_norm, language="zh"
         )
         if info is None:
-            return event.plain_result("未获取到魔胎之境信息（可能是网络限制或接口不可达）。")
+            return event.plain_result(
+                "未获取到魔胎之境信息（可能是网络限制或接口不可达）。"
+            )
         state_cn = info.active or info.state or "未知"
         left = info.time_left or info.eta
         return await render_worldstate_cycle(
@@ -542,22 +556,30 @@ async def cmd_plains(
 
     # No query: list all plains.
     try:
-        cetus = await worldstate_client.fetch_cetus_cycle(platform=platform_norm, language="zh")
+        cetus = await worldstate_client.fetch_cetus_cycle(
+            platform=platform_norm, language="zh"
+        )
     except Exception:
         cetus = None
 
     try:
-        vallis = await worldstate_client.fetch_vallis_cycle(platform=platform_norm, language="zh")
+        vallis = await worldstate_client.fetch_vallis_cycle(
+            platform=platform_norm, language="zh"
+        )
     except Exception:
         vallis = None
 
     try:
-        cambion = await worldstate_client.fetch_cambion_cycle(platform=platform_norm, language="zh")
+        cambion = await worldstate_client.fetch_cambion_cycle(
+            platform=platform_norm, language="zh"
+        )
     except Exception:
         cambion = None
 
     try:
-        duviri = await worldstate_client.fetch_duviri_cycle(platform=platform_norm, language="zh")
+        duviri = await worldstate_client.fetch_duviri_cycle(
+            platform=platform_norm, language="zh"
+        )
     except Exception:
         duviri = None
 
@@ -571,18 +593,24 @@ async def cmd_plains(
         )
         left = cetus.time_left or cetus.eta
         rows.append(
-            WorldstateRow(title="夜灵平原", subtitle=f"当前：{state_cn}", right=f"剩余{left}")
+            WorldstateRow(
+                title="夜灵平原", subtitle=f"当前：{state_cn}", right=f"剩余{left}"
+            )
         )
 
     if vallis is None:
         rows.append(WorldstateRow(title="奥布山谷", subtitle="(获取失败)", right=None))
     else:
         state_cn = vallis.state or (
-            "温暖" if vallis.is_warm else ("寒冷" if vallis.is_warm is False else "未知")
+            "温暖"
+            if vallis.is_warm
+            else ("寒冷" if vallis.is_warm is False else "未知")
         )
         left = vallis.time_left or vallis.eta
         rows.append(
-            WorldstateRow(title="奥布山谷", subtitle=f"当前：{state_cn}", right=f"剩余{left}")
+            WorldstateRow(
+                title="奥布山谷", subtitle=f"当前：{state_cn}", right=f"剩余{left}"
+            )
         )
 
     if cambion is None:
@@ -591,7 +619,9 @@ async def cmd_plains(
         state_cn = cambion.active or cambion.state or "未知"
         left = cambion.time_left or cambion.eta
         rows.append(
-            WorldstateRow(title="魔胎之境", subtitle=f"当前：{state_cn}", right=f"剩余{left}")
+            WorldstateRow(
+                title="魔胎之境", subtitle=f"当前：{state_cn}", right=f"剩余{left}"
+            )
         )
 
     if duviri is None:
@@ -600,7 +630,9 @@ async def cmd_plains(
         state_cn = (duviri.state or "未知").strip()
         left = duviri.time_left or duviri.eta
         rows.append(
-            WorldstateRow(title="双衍王境", subtitle=f"当前：{state_cn}", right=f"剩余{left}")
+            WorldstateRow(
+                title="双衍王境", subtitle=f"当前：{state_cn}", right=f"剩余{left}"
+            )
         )
 
     rendered = await render_worldstate_rows_image_to_file(
@@ -631,9 +663,13 @@ async def cmd_cycle(
     platform_norm = worldstate_platform_from_tokens(tokens)
 
     if cycle == "cetus":
-        info = await worldstate_client.fetch_cetus_cycle(platform=platform_norm, language="zh")
+        info = await worldstate_client.fetch_cetus_cycle(
+            platform=platform_norm, language="zh"
+        )
         if info is None:
-            return event.plain_result("未获取到夜灵平原信息（可能是网络限制或接口不可达）。")
+            return event.plain_result(
+                "未获取到夜灵平原信息（可能是网络限制或接口不可达）。"
+            )
         state_cn = info.state or (
             "白天" if info.is_day else ("夜晚" if info.is_day is False else "未知")
         )
@@ -651,9 +687,13 @@ async def cmd_cycle(
         )
 
     if cycle == "cambion":
-        info = await worldstate_client.fetch_cambion_cycle(platform=platform_norm, language="zh")
+        info = await worldstate_client.fetch_cambion_cycle(
+            platform=platform_norm, language="zh"
+        )
         if info is None:
-            return event.plain_result("未获取到魔胎之境信息（可能是网络限制或接口不可达）。")
+            return event.plain_result(
+                "未获取到魔胎之境信息（可能是网络限制或接口不可达）。"
+            )
         state_cn = info.active or info.state or "未知"
         left = info.time_left or info.eta
         return await render_worldstate_cycle(
@@ -669,9 +709,13 @@ async def cmd_cycle(
         )
 
     if cycle == "earth":
-        info = await worldstate_client.fetch_earth_cycle(platform=platform_norm, language="zh")
+        info = await worldstate_client.fetch_earth_cycle(
+            platform=platform_norm, language="zh"
+        )
         if info is None:
-            return event.plain_result("未获取到地球循环信息（可能是网络限制或接口不可达）。")
+            return event.plain_result(
+                "未获取到地球循环信息（可能是网络限制或接口不可达）。"
+            )
         state_cn = info.state or (
             "白天" if info.is_day else ("夜晚" if info.is_day is False else "未知")
         )
@@ -689,9 +733,13 @@ async def cmd_cycle(
         )
 
     if cycle == "vallis":
-        info = await worldstate_client.fetch_vallis_cycle(platform=platform_norm, language="zh")
+        info = await worldstate_client.fetch_vallis_cycle(
+            platform=platform_norm, language="zh"
+        )
         if info is None:
-            return event.plain_result("未获取到奥布山谷信息（可能是网络限制或接口不可达）。")
+            return event.plain_result(
+                "未获取到奥布山谷信息（可能是网络限制或接口不可达）。"
+            )
         state_cn = info.state or (
             "温暖" if info.is_warm else ("寒冷" if info.is_warm is False else "未知")
         )
@@ -709,9 +757,13 @@ async def cmd_cycle(
         )
 
     if cycle == "duviri":
-        info = await worldstate_client.fetch_duviri_cycle(platform=platform_norm, language="zh")
+        info = await worldstate_client.fetch_duviri_cycle(
+            platform=platform_norm, language="zh"
+        )
         if info is None:
-            return event.plain_result("未获取到双衍王境信息（可能是网络限制或接口不可达）。")
+            return event.plain_result(
+                "未获取到双衍王境信息（可能是网络限制或接口不可达）。"
+            )
 
         circuit = await worldstate_client.fetch_duviri_circuit_rewards(
             platform=platform_norm, language="zh"
@@ -771,14 +823,16 @@ async def cmd_duviri_circuit_rewards(
         platform=platform_norm, language="zh"
     )
     if info is None:
-        return event.plain_result("未获取到轮回奖励信息（可能是网络限制或接口不可达）。")
+        return event.plain_result(
+            "未获取到轮回奖励信息（可能是网络限制或接口不可达）。"
+        )
 
     normal = "、".join(list(info.normal_choices)) or "(未返回)"
     steel = "、".join(list(info.steel_choices)) or "(未返回)"
 
     rows = [
-        WorldstateRow(title="普通轮回", subtitle=normal, right=None),
-        WorldstateRow(title="钢铁轮回", subtitle=steel, right=None),
+        WorldstateRow(title="普通奖励", subtitle=normal, right=None),
+        WorldstateRow(title="钢铁奖励", subtitle=steel, right=None),
     ]
     rendered = await render_worldstate_rows_image_to_file(
         title="轮回奖励",
@@ -794,8 +848,8 @@ async def cmd_duviri_circuit_rewards(
             [
                 f"轮回奖励（{platform_norm}）",
                 f"轮回重置：{info.eta}",
-                f"- 普通轮回：{normal}",
-                f"- 钢铁轮回：{steel}",
+                f"- 普通奖励：{normal}",
+                f"- 钢铁奖励：{steel}",
             ]
         )
     )
@@ -868,7 +922,10 @@ async def cmd_syndicates(
 
     def is_platform_token(tok: str) -> bool:
         t = (tok or "").strip().lower()
-        return t in WORLDSTATE_PLATFORM_ALIASES or t in WORLDSTATE_PLATFORM_ALIASES.values()
+        return (
+            t in WORLDSTATE_PLATFORM_ALIASES
+            or t in WORLDSTATE_PLATFORM_ALIASES.values()
+        )
 
     name_tokens: list[str] = []
     for t in tokens:
@@ -881,9 +938,13 @@ async def cmd_syndicates(
 
     syndicate_query = " ".join(name_tokens).strip()
 
-    syndicates = await worldstate_client.fetch_syndicates(platform=platform_norm, language="zh")
+    syndicates = await worldstate_client.fetch_syndicates(
+        platform=platform_norm, language="zh"
+    )
     if syndicates is None:
-        return event.plain_result("未获取到集团任务信息（可能是网络限制或接口不可达）。")
+        return event.plain_result(
+            "未获取到集团任务信息（可能是网络限制或接口不可达）。"
+        )
     if not syndicates:
         return event.plain_result(f"当前无集团任务（{platform_norm}）。")
 
@@ -935,7 +996,9 @@ async def cmd_syndicates(
         if rendered:
             return event.image_result(rendered.path)
 
-        lines: list[str] = [f"集团 {s.name}（{platform_norm}）剩余{s.eta}：共{len(jobs)}条"]
+        lines: list[str] = [
+            f"集团 {s.name}（{platform_norm}）剩余{s.eta}：共{len(jobs)}条"
+        ]
         for j in jobs:
             node = j.node or "?"
             mtype = j.mission_type or "?"
@@ -950,7 +1013,9 @@ async def cmd_syndicates(
             mtype = j.mission_type or "?"
             jobs.append(f"{mtype}-{node}")
         subtitle = " | ".join(jobs) if jobs else None
-        rows.append(WorldstateRow(title=s.name, subtitle=subtitle, right=f"剩余{s.eta}"))
+        rows.append(
+            WorldstateRow(title=s.name, subtitle=subtitle, right=f"剩余{s.eta}")
+        )
 
     rendered = await render_worldstate_rows_image_to_file(
         title="集团任务",

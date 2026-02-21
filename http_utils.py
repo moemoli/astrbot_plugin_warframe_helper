@@ -7,7 +7,6 @@ import aiohttp
 
 from astrbot.api import logger
 
-
 _proxy_url: str | None = None
 
 

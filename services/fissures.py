@@ -16,7 +16,9 @@ async def render_fissures_text(
     platform_norm: Platform,
     fissure_kind: str,
 ) -> str:
-    fissures = await worldstate_client.fetch_fissures(platform=platform_norm, language="zh")
+    fissures = await worldstate_client.fetch_fissures(
+        platform=platform_norm, language="zh"
+    )
     if fissures is None:
         return "未获取到裂缝信息（可能是网络限制或接口不可达）。"
     if not fissures:
@@ -48,7 +50,9 @@ async def render_fissures_image(
     platform_norm: Platform,
     fissure_kind: str,
 ):
-    fissures = await worldstate_client.fetch_fissures(platform=platform_norm, language="zh")
+    fissures = await worldstate_client.fetch_fissures(
+        platform=platform_norm, language="zh"
+    )
     if fissures is None:
         return None
     if not fissures:

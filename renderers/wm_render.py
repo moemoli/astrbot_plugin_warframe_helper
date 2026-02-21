@@ -6,6 +6,7 @@ import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
 from PIL import Image, ImageDraw, ImageFont
 
 from astrbot.api import logger

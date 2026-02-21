@@ -34,6 +34,16 @@ class EventScopedTTLCache:
         except Exception:
             return
 
+    def put_by_key(self, *, key: str, state: dict) -> None:
+        if not key:
+            return
+        try:
+            rec = dict(state or {})
+            rec["ts"] = time.time()
+            self._data[str(key)] = rec
+        except Exception:
+            return
+
     def get(self, event: AstrMessageEvent) -> dict | None:
         key = None
         try:
@@ -41,17 +51,31 @@ class EventScopedTTLCache:
         except Exception:
             return None
 
-        rec = self._data.get(key)
+        return self.get_by_key(key)
+
+    def get_by_key(self, key: str | None) -> dict | None:
+        if not key:
+            return None
+
+        rec = self._data.get(str(key))
         if not isinstance(rec, dict):
             return None
 
         ts = rec.get("ts")
         if not isinstance(ts, (int, float)):
-            self._data.pop(key, None)
+            self._data.pop(str(key), None)
             return None
 
         if (time.time() - float(ts)) > self._ttl_sec:
-            self._data.pop(key, None)
+            self._data.pop(str(key), None)
             return None
 
         return rec
+
+    def get_by_origin_sender(self, *, origin: str, sender_id: str) -> dict | None:
+        key = f"{origin}|{sender_id}" if origin and sender_id else ""
+        return self.get_by_key(key)
+
+    def put_by_origin_sender(self, *, origin: str, sender_id: str, state: dict) -> None:
+        key = f"{origin}|{sender_id}" if origin and sender_id else ""
+        self.put_by_key(key=key, state=state)

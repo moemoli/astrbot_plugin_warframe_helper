@@ -1,19 +1,20 @@
-import asyncio
 import json
 import re
-import time
 from typing import cast
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Reply
+from astrbot.api.platform import MessageType
 from astrbot.api.star import Context, Star, register
 from astrbot.core.star.filter.command import GreedyStr
 
 from .clients.drop_data_client import DropDataClient
 from .clients.market_client import WarframeMarketClient
 from .clients.public_export_client import PublicExportClient
-from .clients.worldstate_client import Platform, WarframeWorldstateClient
+from .clients.worldstate_client import WarframeWorldstateClient
+from .components.event_ttl_cache import EventScopedTTLCache
+from .components.qq_official_webhook import QQOfficialWebhookPager
 from .constants import (
     MARKET_PLATFORM_ALIASES,
     RIVEN_POLARITY_CN,
@@ -21,7 +22,6 @@ from .constants import (
     RIVEN_STAT_CN,
     WM_BUY_ALIASES,
     WM_SELL_ALIASES,
-    WORLDSTATE_PLATFORM_ALIASES,
 )
 from .helpers import (
     presence_rank,
@@ -38,15 +38,11 @@ from .renderers.worldstate_render import (
     WorldstateRow,
     render_worldstate_rows_image_to_file,
 )
-
-from .components.event_ttl_cache import EventScopedTTLCache
-from .components.qq_official_webhook import QQOfficialWebhookPager
 from .services import drop_data_commands, public_export_commands, worldstate_commands
-from .services.fissures import render_fissures_image, render_fissures_text
 from .services.subscriptions import SubscriptionService
-from .services.worldstate_views import render_worldstate_cycle
-from .utils.platforms import eta_key, worldstate_platform_from_tokens
-from .utils.text import normalize_compact, safe_relic_name
+from .utils.platforms import worldstate_platform_from_tokens
+
+QQ_OFFICIAL_WEBHOOK_PAGER_TEMPLATE_ID_DEFAULT = "102070299_1771653647"
 
 
 @register("warframe_helper", "moemoli", "Warframe 助手", "v0.0.1")
@@ -78,15 +74,37 @@ class WarframeHelperPlugin(Star):
 
         # QQ official webhook keyboard template id (message buttons).
         # Note: QQ button templates do NOT support variables.
-        qq_tpl = str(
-            (
+        try:
+            cfg_val = (
                 self.config.get("qq_official_webhook_pager_keyboard_template_id")
                 if self.config
-                else ""
+                else None
             )
-            or ""
-        ).strip()
-        self._qq_pager = QQOfficialWebhookPager(keyboard_template_id=qq_tpl)
+        except Exception:
+            cfg_val = None
+
+        qq_tpl = (
+            str(cfg_val or "").strip() or QQ_OFFICIAL_WEBHOOK_PAGER_TEMPLATE_ID_DEFAULT
+        )
+
+        try:
+            md_tpl = (
+                self.config.get("qq_official_webhook_markdown_template_id")
+                if self.config
+                else None
+            )
+        except Exception:
+            md_tpl = None
+
+        self._qq_pager = QQOfficialWebhookPager(
+            keyboard_template_id=qq_tpl,
+            markdown_template_id=str(md_tpl or "").strip(),
+            enable_markdown_reply=bool(
+                (self.config or {}).get("qq_official_webhook_enable_markdown_reply")
+            ),
+        )
+
+        self._qq_pager.set_interaction_handler(self._on_qq_interaction_create)
 
         # Fissure subscription (proactive notifications)
         self._subscriptions = SubscriptionService(
@@ -107,6 +125,427 @@ class WarframeHelperPlugin(Star):
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
         await self._subscriptions.stop()
+
+    async def _on_qq_interaction_create(self, bot: object, interaction: object) -> None:
+        """Handle QQ official message button callbacks (action.type=1).
+
+        This must stay inside plugin code (no AstrBot core changes).
+        """
+
+        if not self._qq_pager.enable_markdown_reply:
+            return
+
+        try:
+            resolved = getattr(getattr(interaction, "data", None), "resolved", None)
+            button_data = getattr(resolved, "button_data", None)
+            button_id = getattr(resolved, "button_id", None)
+            raw = str(button_data or button_id or "").strip().lower()
+        except Exception:
+            raw = ""
+
+        if not raw:
+            return
+
+        direction = None
+        if raw in {
+            "wfp:prev",
+            "prev",
+            "previous",
+            "上一页",
+            "上",
+            "up",
+        } or raw.endswith(":prev"):
+            direction = "prev"
+        elif raw in {"wfp:next", "next", "下一页", "下", "down"} or raw.endswith(
+            ":next"
+        ):
+            direction = "next"
+
+        if not direction:
+            # Not our button.
+            return
+
+        # ACK after we confirm it's our button.
+        try:
+            interaction_id = getattr(interaction, "id", None)
+            if interaction_id and getattr(bot, "api", None):
+                await bot.api.on_interaction_result(str(interaction_id), 0)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+        platform = getattr(bot, "platform", None)
+        if not platform:
+            return
+
+        platform_id = ""
+        try:
+            platform_id = str(platform.meta().id)
+        except Exception:
+            return
+
+        session_id = ""
+        sender_id = ""
+        message_type = MessageType.GROUP_MESSAGE
+
+        try:
+            group_openid = getattr(interaction, "group_openid", None)
+            user_openid = getattr(interaction, "user_openid", None)
+            channel_id = getattr(interaction, "channel_id", None)
+            group_member_openid = getattr(interaction, "group_member_openid", None)
+            resolved_user_id = getattr(resolved, "user_id", None)
+            resolved_message_id = getattr(resolved, "message_id", None)
+
+            if group_openid:
+                session_id = str(group_openid)
+                message_type = MessageType.GROUP_MESSAGE
+                sender_id = str(group_member_openid or resolved_user_id or "")
+                try:
+                    platform.remember_session_scene(session_id, "group")
+                except Exception:
+                    pass
+            elif user_openid:
+                session_id = str(user_openid)
+                message_type = MessageType.FRIEND_MESSAGE
+                sender_id = str(user_openid)
+            elif channel_id:
+                session_id = str(channel_id)
+                message_type = MessageType.GROUP_MESSAGE
+                sender_id = str(resolved_user_id or "")
+                try:
+                    platform.remember_session_scene(session_id, "channel")
+                except Exception:
+                    pass
+            else:
+                return
+
+            if resolved_message_id:
+                try:
+                    platform.remember_session_message_id(
+                        session_id, str(resolved_message_id)
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            return
+
+        if not session_id or not sender_id:
+            return
+
+        origin = f"{platform_id}:{message_type.value}:{session_id}"
+        state = self._pager_cache.get_by_origin_sender(
+            origin=origin, sender_id=sender_id
+        )
+        if not state:
+            await self._qq_pager.send_markdown_notice_interaction(
+                bot,
+                interaction,
+                title="翻页",
+                content="没有可翻页的记录，请先执行 /wm 或 /wmr。",
+            )
+            return
+
+        kind = str(state.get("kind") or "").strip().lower()
+        page = int(state.get("page") or 1)
+        limit = int(state.get("limit") or 10)
+        limit = max(1, min(int(limit), 20))
+
+        if direction == "prev":
+            if page <= 1:
+                await self._qq_pager.send_markdown_notice_interaction(
+                    bot,
+                    interaction,
+                    title="翻页",
+                    content="已经是第一页。",
+                )
+                return
+            page -= 1
+        else:
+            page += 1
+
+        state["page"] = page
+        state["limit"] = limit
+        self._pager_cache.put_by_origin_sender(
+            origin=origin, sender_id=sender_id, state=state
+        )
+
+        try:
+            from astrbot.api.event import MessageChain
+            from astrbot.api.message_components import Image
+            from astrbot.core.platform.message_session import MessageSession
+        except Exception:
+            return
+
+        session = MessageSession(platform_id, message_type, session_id)
+
+        if kind == "wm":
+            item = state.get("item")
+            platform_norm = str(state.get("platform") or "pc")
+            order_type = str(state.get("order_type") or "sell")
+            language = str(state.get("language") or "zh")
+            if not item or not getattr(item, "item_id", None):
+                await self._qq_pager.send_markdown_notice_interaction(
+                    bot,
+                    interaction,
+                    title="翻页",
+                    content="分页信息已过期，请重新执行 /wm。",
+                )
+                return
+
+            orders = await self.market_client.fetch_orders_by_item_id(item.item_id)
+            if not orders:
+                await self._qq_pager.send_markdown_notice_interaction(
+                    bot,
+                    interaction,
+                    title="翻页",
+                    content="未获取到订单（可能是网络限制或接口不可达）。",
+                )
+                return
+
+            filtered = [
+                o
+                for o in orders
+                if o.visible
+                and o.order_type == order_type
+                and (o.platform or "").lower() == platform_norm
+            ]
+            filtered.sort(
+                key=lambda o: (
+                    presence_rank(o.status),
+                    o.platinum,
+                    (o.ingame_name or ""),
+                ),
+            )
+            offset = (page - 1) * limit
+            top = filtered[offset : offset + limit]
+            if not top:
+                await self._qq_pager.send_markdown_notice_interaction(
+                    bot,
+                    interaction,
+                    title="翻页",
+                    content="没有更多结果了。",
+                )
+                return
+
+            rendered = await render_wm_orders_image_to_file(
+                item=item,
+                orders=top,
+                platform=platform_norm,
+                action_cn=("收购" if order_type == "buy" else "出售"),
+                language=language,
+                limit=limit,
+            )
+            if not rendered:
+                await self._qq_pager.send_markdown_notice_interaction(
+                    bot,
+                    interaction,
+                    title="翻页",
+                    content="图片渲染失败，请稍后重试。",
+                )
+                return
+
+            try:
+                await platform.send_by_session(
+                    session,
+                    MessageChain([Image.fromFileSystem(rendered.path)]),
+                )
+            except Exception as exc:
+                logger.warning(f"QQ interaction paging send image failed: {exc!s}")
+                return
+
+            await self._qq_pager.send_pager_keyboard_interaction(
+                bot,
+                interaction,
+                kind="/wm",
+                page=page,
+            )
+            return
+
+        if kind == "wmr":
+            weapon = state.get("weapon")
+            if not weapon or not getattr(weapon, "url_name", None):
+                await self._qq_pager.send_markdown_notice_interaction(
+                    bot,
+                    interaction,
+                    title="翻页",
+                    content="分页信息已过期，请重新执行 /wmr。",
+                )
+                return
+
+            platform_norm = str(state.get("platform") or "pc")
+            language = str(state.get("language") or "zh")
+            weapon_query = str(state.get("weapon_query") or "")
+            positive_stats = [
+                str(x).strip()
+                for x in (state.get("positive_stats") or [])
+                if str(x).strip()
+            ]
+            negative_stats = [
+                str(x).strip()
+                for x in (state.get("negative_stats") or [])
+                if str(x).strip()
+            ]
+            negative_required = bool(state.get("negative_required") or False)
+            mastery_rank_min = state.get("mastery_rank_min")
+            if mastery_rank_min is not None:
+                try:
+                    mastery_rank_min = int(mastery_rank_min)
+                except Exception:
+                    mastery_rank_min = None
+            polarity = state.get("polarity")
+            polarity = str(polarity).strip().lower() if polarity else None
+
+            auctions = await self.market_client.fetch_riven_auctions(
+                weapon.url_name,
+                platform=platform_norm,
+                positive_stats=positive_stats,
+                negative_stats=negative_stats,
+                mastery_rank_min=mastery_rank_min,
+                polarity=polarity,
+                buyout_policy="direct",
+            )
+            if not auctions:
+                await self._qq_pager.send_markdown_notice_interaction(
+                    bot,
+                    interaction,
+                    title="翻页",
+                    content="未获取到紫卡拍卖数据（可能是网络限制或接口不可达）。",
+                )
+                return
+
+            filtered = [
+                a
+                for a in auctions
+                if a.visible
+                and (not a.closed)
+                and a.is_direct_sell
+                and (a.platform or "").lower() == platform_norm
+            ]
+            if negative_required and not negative_stats:
+                filtered = [
+                    a for a in filtered if any((not x.positive) for x in a.attributes)
+                ]
+
+            req_pos = set(uniq_lower(positive_stats))
+            req_neg = set(uniq_lower(negative_stats))
+
+            def stat_fit_score(a) -> int:
+                a_pos = {x.url_name for x in a.attributes if x.positive}
+                a_neg = {x.url_name for x in a.attributes if not x.positive}
+
+                score = 0
+                score += 10 * len(req_pos & a_pos)
+                score += 10 * len(req_neg & a_neg)
+                score -= 50 * len(req_pos - a_pos)
+                score -= 50 * len(req_neg - a_neg)
+
+                if negative_required and not a_neg:
+                    score -= 20
+
+                if req_pos:
+                    score -= len(a_pos - req_pos)
+                if req_neg:
+                    score -= len(a_neg - req_neg)
+
+                if polarity:
+                    if (a.polarity or "").strip().lower() == polarity.strip().lower():
+                        score += 5
+                    else:
+                        score -= 5
+
+                if mastery_rank_min is not None and a.mastery_level is not None:
+                    score -= abs(int(a.mastery_level) - int(mastery_rank_min))
+
+                return score
+
+            scored: list[tuple[int, object]] = [
+                (stat_fit_score(a), a) for a in filtered
+            ]
+            scored.sort(
+                key=lambda x: (
+                    -int(x[0]),
+                    presence_rank(getattr(x[1], "owner_status", None)),
+                    int(getattr(x[1], "buyout_price", 0) or 0),
+                    (getattr(x[1], "auction_id", "") or ""),
+                ),
+            )
+            ranked = [a for _, a in scored]
+            offset = (page - 1) * limit
+            picked = ranked[offset : offset + limit]
+            if not picked:
+                await self._qq_pager.send_markdown_notice_interaction(
+                    bot,
+                    interaction,
+                    title="翻页",
+                    content="没有更多结果了。",
+                )
+                return
+
+            picked.sort(
+                key=lambda a: (
+                    presence_rank(getattr(a, "owner_status", None)),
+                    int(getattr(a, "buyout_price", 0) or 0),
+                    (getattr(a, "owner_name", "") or ""),
+                ),
+            )
+            top = cast(list, picked)
+
+            def fmt_stats(stats: list[str]) -> str:
+                return "+".join([RIVEN_STAT_CN.get(s, s) for s in stats])
+
+            parts: list[str] = []
+            if positive_stats:
+                parts.append("正:" + fmt_stats(positive_stats))
+            if negative_stats:
+                parts.append("负:" + fmt_stats(negative_stats))
+            elif negative_required:
+                parts.append("负:任意")
+            if mastery_rank_min is not None:
+                parts.append(f"MR≥{mastery_rank_min}")
+            if polarity:
+                parts.append("极性" + RIVEN_POLARITY_CN.get(polarity, polarity))
+            summary = " ".join(parts) if parts else "(无筛选)"
+
+            rendered = await render_wmr_auctions_image_to_file(
+                weapon=weapon,
+                weapon_display_name=("" if language.startswith("en") else weapon_query),
+                auctions=top,
+                platform=platform_norm,
+                summary=summary,
+                limit=len(top),
+            )
+            if not rendered:
+                await self._qq_pager.send_markdown_notice_interaction(
+                    bot,
+                    interaction,
+                    title="翻页",
+                    content="图片渲染失败，请稍后重试。",
+                )
+                return
+
+            try:
+                await platform.send_by_session(
+                    session,
+                    MessageChain([Image.fromFileSystem(rendered.path)]),
+                )
+            except Exception as exc:
+                logger.warning(f"QQ interaction paging send image failed: {exc!s}")
+                return
+
+            await self._qq_pager.send_pager_keyboard_interaction(
+                bot,
+                interaction,
+                kind="/wmr",
+                page=page,
+            )
+            return
+
+        await self._qq_pager.send_markdown_notice_interaction(
+            bot,
+            interaction,
+            title="翻页",
+            content="当前记录不支持翻页，请重新执行 /wm 或 /wmr。",
+        )
+        return
 
     @filter.command("订阅")
     async def wf_subscribe(
@@ -1051,6 +1490,13 @@ class WarframeHelperPlugin(Star):
 
         state = self._pager_cache.get(event)
         if not state:
+            if self._qq_pager.enabled_for(event):
+                await self._qq_pager.send_markdown_notice(
+                    event,
+                    title="翻页",
+                    content="没有可翻页的记录，请先执行 /wm 或 /wmr。",
+                )
+                return
             yield event.plain_result("没有可翻页的记录，请先执行 /wm 或 /wmr。")
             return
 
@@ -1061,6 +1507,13 @@ class WarframeHelperPlugin(Star):
 
         if direction == "prev":
             if page <= 1:
+                if self._qq_pager.enabled_for(event):
+                    await self._qq_pager.send_markdown_notice(
+                        event,
+                        title="翻页",
+                        content="已经是第一页。",
+                    )
+                    return
                 yield event.plain_result("已经是第一页。")
                 return
             page -= 1
@@ -1102,6 +1555,13 @@ class WarframeHelperPlugin(Star):
             offset = (page - 1) * limit
             top = filtered[offset : offset + limit]
             if not top:
+                if self._qq_pager.enabled_for(event):
+                    await self._qq_pager.send_markdown_notice(
+                        event,
+                        title="翻页",
+                        content="没有更多结果了。",
+                    )
+                    return
                 yield event.plain_result("没有更多结果了。")
                 return
 
@@ -1262,6 +1722,13 @@ class WarframeHelperPlugin(Star):
             offset = (page - 1) * limit
             picked = ranked[offset : offset + limit]
             if not picked:
+                if self._qq_pager.enabled_for(event):
+                    await self._qq_pager.send_markdown_notice(
+                        event,
+                        title="翻页",
+                        content="没有更多结果了。",
+                    )
+                    return
                 yield event.plain_result("没有更多结果了。")
                 return
 
@@ -1335,6 +1802,28 @@ class WarframeHelperPlugin(Star):
             return
 
         yield event.plain_result("当前记录不支持翻页，请重新执行 /wm 或 /wmr。")
+
+    @filter.regex(r"^(上一页|下一页|prev|previous|next)$")
+    async def qq_official_webhook_button_page(self, event: AstrMessageEvent):
+        """Handle QQ official webhook template buttons.
+
+        Some QQ keyboard templates are configured to send plain text like “上一页/下一页”.
+        This handler converts them into /wfp prev|next.
+        """
+
+        if not self._qq_pager.enabled_for(event):
+            return
+
+        try:
+            event.should_call_llm(False)
+        except Exception:
+            pass
+
+        text = (event.get_message_str() or "").strip().lower()
+        direction = "prev" if text in {"上一页", "prev", "previous"} else "next"
+
+        async for res in self.wf_page(event, args=direction):
+            yield res
 
     @filter.regex(r"^\d+$")
     async def wm_pick_number(self, event: AstrMessageEvent):

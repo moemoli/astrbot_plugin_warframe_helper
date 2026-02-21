@@ -84,6 +84,100 @@ class PublicExportClient:
         self._mem_nightwave_map: dict[str, dict[str, tuple[str, int | None]]] = {}
         # localized slug -> [english names]
         self._mem_localized_to_en: dict[str, dict[str, list[str]]] = {}
+        # english slug -> localized name
+        self._mem_en_to_localized: dict[str, dict[str, str]] = {}
+
+    @staticmethod
+    def _has_cjk(s: str) -> bool:
+        return any("\u4e00" <= ch <= "\u9fff" for ch in (s or ""))
+
+    async def _get_english_to_localized_map(self, *, language: str) -> dict[str, str]:
+        """Build a best-effort mapping: English display name -> localized display name.
+
+        Used for data sources that return English names even under zh worldstate.
+        """
+
+        lang = (language or "zh").strip().lower() or "zh"
+        cached = self._mem_en_to_localized.get(lang)
+        if cached is not None:
+            return cached
+
+        # Export types most likely to cover Duviri Circuit rewards.
+        export_specs = [
+            ("Weapons", "ExportWeapons"),
+            ("Warframes", "ExportWarframes"),
+            ("Upgrades", "ExportUpgrades"),
+            ("Gear", "ExportGear"),
+            ("Customs", "ExportCustoms"),
+        ]
+
+        out: dict[str, str] = {}
+        for short, list_key in export_specs:
+            en_data = await self.fetch_export(f"Export{short}_en.json", language="en")
+            loc_data = await self.fetch_export(
+                f"Export{short}_{lang}.json", language=lang
+            )
+            if not isinstance(en_data, dict) or not isinstance(loc_data, dict):
+                continue
+
+            en_list = en_data.get(list_key)
+            loc_list = loc_data.get(list_key)
+            if not isinstance(en_list, list) or not isinstance(loc_list, list):
+                continue
+
+            en_by_unique: dict[str, str] = {}
+            for row in en_list:
+                if not isinstance(row, dict):
+                    continue
+                uniq = row.get("uniqueName")
+                name = row.get("name")
+                if isinstance(uniq, str) and isinstance(name, str) and uniq and name:
+                    en_by_unique.setdefault(uniq, name)
+
+            for row in loc_list:
+                if not isinstance(row, dict):
+                    continue
+                uniq = row.get("uniqueName")
+                loc_name = row.get("name")
+                if not isinstance(uniq, str) or not isinstance(loc_name, str):
+                    continue
+                en_name = en_by_unique.get(uniq)
+                if not en_name:
+                    continue
+                key = _slug(en_name)
+                if key and key not in out:
+                    out[key] = loc_name
+
+        self._mem_en_to_localized[lang] = out
+        return out
+
+    async def translate_display_name(
+        self, name: str, *, language: str = "zh"
+    ) -> str | None:
+        """Translate a *display name* to a localized display name.
+
+        Priority:
+        1) If it looks like a uniqueName path, use uniqueName map.
+        2) If already contains CJK characters, keep as-is.
+        3) Otherwise, treat it as English name and map to localized via PublicExport.
+        """
+
+        lang = (language or "zh").strip().lower() or "zh"
+        raw = (name or "").strip()
+        if not raw:
+            return None
+
+        # uniqueName paths in PublicExport usually start with "/".
+        if raw.startswith("/"):
+            mapped = await self.translate_unique_name(raw, language=lang)
+            if mapped:
+                return mapped
+
+        if self._has_cjk(raw):
+            return raw
+
+        mapping = await self._get_english_to_localized_map(language=lang)
+        return mapping.get(_slug(raw))
 
     def _base_dir(self) -> Path:
         base = Path(get_astrbot_plugin_data_path())

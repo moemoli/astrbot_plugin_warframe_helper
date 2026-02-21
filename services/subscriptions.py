@@ -107,7 +107,9 @@ class SubscriptionService:
             return cast(Platform, p)
         return "pc"
 
-    def _parse_fissure_subscribe_query(self, *, raw_args: str, tokens: list[str]) -> dict | None:
+    def _parse_fissure_subscribe_query(
+        self, *, raw_args: str, tokens: list[str]
+    ) -> dict | None:
         raw = (raw_args or "").strip()
         if not raw:
             return None
@@ -127,17 +129,29 @@ class SubscriptionService:
 
         tier = ""  # 古纪/前纪/中纪/后纪/安魂/全能 (optional)
         compact_l = compact.lower()
-        if any(k in compact for k in ["全能"]) or any(k in compact_l for k in ["omnia", "t6", "voidt6"]):
+        if any(k in compact for k in ["全能"]) or any(
+            k in compact_l for k in ["omnia", "t6", "voidt6"]
+        ):
             tier = "全能"
-        elif any(k in compact for k in ["安魂"]) or any(k in compact_l for k in ["requiem", "t5", "voidt5"]):
+        elif any(k in compact for k in ["安魂"]) or any(
+            k in compact_l for k in ["requiem", "t5", "voidt5"]
+        ):
             tier = "安魂"
-        elif any(k in compact for k in ["后纪"]) or any(k in compact_l for k in ["t4", "voidt4"]):
+        elif any(k in compact for k in ["后纪"]) or any(
+            k in compact_l for k in ["t4", "voidt4"]
+        ):
             tier = "后纪"
-        elif any(k in compact for k in ["中纪"]) or any(k in compact_l for k in ["t3", "voidt3"]):
+        elif any(k in compact for k in ["中纪"]) or any(
+            k in compact_l for k in ["t3", "voidt3"]
+        ):
             tier = "中纪"
-        elif any(k in compact for k in ["前纪"]) or any(k in compact_l for k in ["t2", "voidt2"]):
+        elif any(k in compact for k in ["前纪"]) or any(
+            k in compact_l for k in ["t2", "voidt2"]
+        ):
             tier = "前纪"
-        elif any(k in compact for k in ["古纪"]) or any(k in compact_l for k in ["t1", "voidt1"]):
+        elif any(k in compact for k in ["古纪"]) or any(
+            k in compact_l for k in ["t1", "voidt1"]
+        ):
             tier = "古纪"
 
         code = compact
@@ -320,7 +334,9 @@ class SubscriptionService:
             "remaining": None,
         }
 
-    def _parse_cycle_subscribe_query(self, *, raw_args: str, tokens: list[str]) -> dict | None:
+    def _parse_cycle_subscribe_query(
+        self, *, raw_args: str, tokens: list[str]
+    ) -> dict | None:
         raw = (raw_args or "").strip()
         if not raw:
             return None
@@ -402,7 +418,9 @@ class SubscriptionService:
     async def guess_fissure_subscribe_query_via_llm(
         self, *, event: AstrMessageEvent, query: str, platform_norm: Platform
     ) -> dict | None:
-        provider_id = self._config.get("unknown_abbrev_provider_id") if self._config else ""
+        provider_id = (
+            self._config.get("unknown_abbrev_provider_id") if self._config else ""
+        )
         if not provider_id:
             return None
 
@@ -565,7 +583,9 @@ class SubscriptionService:
                 )
         return MessageChain().message("\n".join(lines))
 
-    async def subscribe(self, *, event: AstrMessageEvent, raw_args: str) -> tuple[str | None, MessageChain | None]:
+    async def subscribe(
+        self, *, event: AstrMessageEvent, raw_args: str
+    ) -> tuple[str | None, MessageChain | None]:
         """Handle subscription creation.
 
         Returns:
@@ -717,12 +737,8 @@ class SubscriptionService:
 
         if removed:
             if str(rec.get("type") or "fissure") == "cycle":
-                return (
-                    f"已退订：{rec.get('plain', '夜灵平原')} {rec.get('state', '?')}（{rec.get('platform', 'pc')}）"
-                )
-            return (
-                f"已退订：{rec['kind']} {rec['planet']}{(rec.get('tier') or '')}{rec['mission_type']}（{rec['platform']}）"
-            )
+                return f"已退订：{rec.get('plain', '夜灵平原')} {rec.get('state', '?')}（{rec.get('platform', 'pc')}）"
+            return f"已退订：{rec['kind']} {rec['planet']}{(rec.get('tier') or '')}{rec['mission_type']}（{rec['platform']}）"
 
         return "未找到对应订阅记录。"
 
@@ -748,7 +764,9 @@ class SubscriptionService:
             return False
         if kind == "钢铁" and not getattr(f, "is_hard", False):
             return False
-        if kind == "普通" and (getattr(f, "is_hard", False) or getattr(f, "is_storm", False)):
+        if kind == "普通" and (
+            getattr(f, "is_hard", False) or getattr(f, "is_storm", False)
+        ):
             return False
 
         node = str(getattr(f, "node", "") or "")
@@ -813,7 +831,9 @@ class SubscriptionService:
                                 to_remove_ids.add(sid)
                             continue
 
-                        matches = [f for f in fissures if self._match_fissure(sub=s, f=f)]
+                        matches = [
+                            f for f in fissures if self._match_fissure(sub=s, f=f)
+                        ]
                         sigs = [self._fissure_sig(f) for f in matches]
                         sigs = [x for x in sigs if x]
                         sigs.sort()
@@ -831,7 +851,11 @@ class SubscriptionService:
                                 f"【裂缝订阅】已匹配到：{kind} {planet}{mt}（{platform_norm}）"
                             ]
                             for f in matches[:5]:
-                                tag = "钢铁" if f.is_hard else ("九重天" if f.is_storm else "普通")
+                                tag = (
+                                    "钢铁"
+                                    if f.is_hard
+                                    else ("九重天" if f.is_storm else "普通")
+                                )
                                 lines.append(
                                     f"- {tag} {f.tier} {f.mission_type} {f.node} | 剩余{f.eta}"
                                 )
@@ -859,7 +883,9 @@ class SubscriptionService:
                             continue
 
                         current_state = cetus.state or (
-                            "白天" if cetus.is_day else ("夜晚" if cetus.is_day is False else "未知")
+                            "白天"
+                            if cetus.is_day
+                            else ("夜晚" if cetus.is_day is False else "未知")
                         )
                         left = cetus.time_left or cetus.eta
 
@@ -928,7 +954,8 @@ class SubscriptionService:
                         self._subscriptions = [
                             s
                             for s in self._subscriptions
-                            if isinstance(s, dict) and str(s.get("id") or "").strip() not in to_remove_ids
+                            if isinstance(s, dict)
+                            and str(s.get("id") or "").strip() not in to_remove_ids
                         ]
                         self._save()
 

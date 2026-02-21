@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import cast
 
+from ..clients.worldstate_client import Platform
 from ..constants import MARKET_PLATFORM_ALIASES, WORLDSTATE_PLATFORM_ALIASES
 from ..helpers import eta_key_zh, parse_platform
-from ..clients.worldstate_client import Platform
 
 
 def worldstate_platform_from_tokens(tokens: list[str]) -> Platform:
