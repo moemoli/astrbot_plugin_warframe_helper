@@ -5,63 +5,37 @@
     "description": "HTTP 代理（可选）",
     "hint": "为空时使用系统/环境代理（aiohttp trust_env）。非空时将强制所有插件请求使用该代理。格式示例：http://127.0.0.1:7890"
   },
-    "unknown_abbrev_provider_id": {
+  "unknown_abbrev_provider_id": {
     "type": "string",
     "default": "",
     "_special": "select_provider",
     "description": "解析模型",
-     "hint": "在wm/wmr等指令中，当用户输入了无法识别的缩写时，插件会使用该解析模型尝试解析。"
-  
+    "hint": "在wm/wmr等指令中，当用户输入了无法识别的缩写时，插件会使用该解析模型尝试解析。"
   },
-  "qq_official_webhook_pager_keyboard_template_id": {
-    "type": "string",
-    "default": "",
-    "description": "QQ 官方机器人：翻页按钮模板 ID",
-    "hint": "用于 /wm 与 /wmr 的翻页按钮（上一页/下一页）。按钮模板需在 QQ 官方后台创建，并配置按钮发送文本：/wfp prev 与 /wfp next（或仅发送 上一页/下一页）。",
-    "invisible": true
-  },
-  "qq_official_webhook_markdown_template_id": {
-    "type": "string",
-    "default": "",
-    "description": "QQ 官方机器人：Markdown 模板 ID",
-    "hint": "在 QQ 官方后台创建 Markdown 消息模板后获得。插件会用该模板发送翻页提示/通知（模板参数 key 见插件 README 或对话说明）。",
-    "invisible": true
-  },
-  "qq_official_webhook_enable_markdown_reply": {
-    "type": "bool",
-    "default": false,
-    "description": "QQ 官方机器人：启用 Markdown 回复",
-    "hint": "开启后：QQ 官方 Webhook 平台将使用 Markdown 模板回复，并启用翻页消息按钮（需要按钮 action.type=1 回调，button_data 建议为 wfp:prev / wfp:next）。关闭后：保持原有纯文本/图片回复逻辑。",
-    "invisible": true
-  },
-  "qq_official_webhook": {
-    "type": "template_list",
-    "description": "QQ 官方机器人（Webhook）配置",
-    "hint": "将 QQ 官方 Webhook 的 Markdown 回复开关、翻页键盘模板 ID、Markdown 模板 ID 合并到一个配置项中。",
-    "templates": {
-      "paging_md_buttons": {
-        "name": "翻页 + Markdown（按钮回调）",
-        "hint": "用于 QQ 官方 Webhook 平台：启用 Markdown 模板回复，并使用消息按钮翻页（按钮 action.type=1，button_data 建议为 wfp:prev / wfp:next）。",
-        "items": {
-          "enable_markdown_reply": {
-            "type": "bool",
-            "default": false,
-            "description": "启用 Markdown 回复",
-            "hint": "开启后：QQ 官方 Webhook 平台将优先使用 Markdown 模板 + 消息按钮；关闭后：保持原有纯文本/图片回复逻辑。"
-          },
-          "pager_keyboard_template_id": {
-            "type": "string",
-            "default": "",
-            "description": "翻页按钮模板 ID",
-            "hint": "QQ 官方后台创建的按钮模板 ID（用于 /wm 与 /wmr 的上一页/下一页）。"
-          },
-          "markdown_template_id": {
-            "type": "string",
-            "default": "",
-            "description": "Markdown 模板 ID",
-            "hint": "QQ 官方后台创建的 Markdown 消息模板 ID（模板参数 key 见插件说明）。"
-          }
-        }
+  "sub_config": {
+    "description": "QQ官方机器人配置",
+    "type": "object",
+    "items": {
+      "qq_official_webhook_enable_markdown_reply": {
+        "type": "bool",
+        "default": false,
+        "description": "启用 Markdown 回复",
+        "hint": "开启后：QQ 官方 Webhook 平台将使用 Markdown 模板回复，并启用翻页消息按钮（需要按钮 action.type=1 回调，button_data 建议为 wfp:prev / wfp:next）。关闭后：保持原有纯文本/图片回复逻辑。",
+        "invisible": true
+      },
+      "qq_official_webhook_pager_keyboard_template_id": {
+        "type": "string",
+        "default": "",
+        "description": "翻页按钮模板 ID",
+        "hint": "用于 /wm 与 /wmr 的翻页按钮（上一页/下一页）。按钮模板需在 QQ 官方后台创建，并配置按钮发送文本：/wfp prev 与 /wfp next（或仅发送 上一页/下一页）。",
+        "invisible": true
+      },
+      "qq_official_webhook_markdown_template_id": {
+        "type": "string",
+        "default": "",
+        "description": "Markdown 模板 ID",
+        "hint": "在 QQ 官方后台创建 Markdown 消息模板后获得。插件会用该模板发送翻页提示/通知（模板参数 key 见插件 README 或对话说明）。",
+        "invisible": true
       }
     }
   }

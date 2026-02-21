@@ -97,6 +97,110 @@ async def cmd_sortie(
     return event.plain_result("\n".join(lines))
 
 
+async def cmd_archon_hunt(
+    *,
+    event: AstrMessageEvent,
+    raw_args: str,
+    worldstate_client: WarframeWorldstateClient,
+):
+    tokens = split_tokens(str(raw_args))
+    platform_norm = worldstate_platform_from_tokens(tokens)
+
+    info = await worldstate_client.fetch_archon_hunt(
+        platform=platform_norm, language="zh"
+    )
+    if not info:
+        return event.plain_result(
+            "未获取到执行官猎杀信息（可能是网络限制或接口不可达）。"
+        )
+
+    header_lines: list[str] = [f"平台：{platform_norm}"]
+    if info.boss:
+        header_lines.append(f"Boss：{info.boss}")
+    if info.faction:
+        header_lines.append(f"阵营：{info.faction}")
+
+    rows: list[WorldstateRow] = []
+    if info.stages:
+        for idx, stage in enumerate(info.stages, start=1):
+            mod = f" | {stage.modifier}" if stage.modifier else ""
+            rows.append(
+                WorldstateRow(
+                    title=f"{idx}. {stage.mission_type}",
+                    subtitle=f"{stage.node}{mod}",
+                    right=f"剩余{info.eta}",
+                )
+            )
+    else:
+        rows.append(WorldstateRow(title="(暂无任务详情)", right=f"剩余{info.eta}"))
+
+    rendered = await render_worldstate_rows_image_to_file(
+        title="执行官猎杀",
+        header_lines=header_lines,
+        rows=rows,
+        accent=(239, 68, 68, 255),
+    )
+    if rendered:
+        return event.image_result(rendered.path)
+
+    head_parts: list[str] = [f"执行官猎杀（{platform_norm}）"]
+    if info.boss:
+        head_parts.append(str(info.boss))
+    if info.faction:
+        head_parts.append(str(info.faction))
+    head_parts.append(f"剩余{info.eta}")
+    lines: list[str] = [" ".join(head_parts)]
+
+    if not info.stages:
+        lines.append("(暂无任务详情)")
+        return event.plain_result("\n".join(lines))
+
+    for idx, stage in enumerate(info.stages, start=1):
+        mod = f" | {stage.modifier}" if stage.modifier else ""
+        lines.append(f"{idx}. {stage.mission_type} - {stage.node}{mod}")
+    return event.plain_result("\n".join(lines))
+
+
+async def cmd_steel_path_reward(
+    *,
+    event: AstrMessageEvent,
+    raw_args: str,
+    worldstate_client: WarframeWorldstateClient,
+):
+    tokens = split_tokens(str(raw_args))
+    platform_norm = worldstate_platform_from_tokens(tokens)
+
+    info = await worldstate_client.fetch_steel_path_reward(
+        platform=platform_norm,
+        language="zh",
+    )
+    if not info:
+        return event.plain_result(
+            "未获取到钢铁奖励信息（可能是网络限制或接口不可达）。"
+        )
+
+    reward = info.reward or "(未知奖励)"
+    rows = [
+        WorldstateRow(
+            title=f"当前奖励：{reward}",
+            subtitle=None,
+            right=f"剩余{info.eta}",
+        )
+    ]
+    rendered = await render_worldstate_rows_image_to_file(
+        title="钢铁奖励",
+        header_lines=[f"平台：{platform_norm}"],
+        rows=rows,
+        accent=(100, 116, 139, 255),
+    )
+    if rendered:
+        return event.image_result(rendered.path)
+
+    return event.plain_result(
+        f"钢铁奖励（{platform_norm}）\n- 当前：{reward}\n- 剩余{info.eta}"
+    )
+
+
 async def cmd_alerts(
     *,
     event: AstrMessageEvent,
@@ -968,12 +1072,12 @@ async def cmd_syndicates(
             )
 
         s = matched[0]
-        jobs = list(s.jobs or ())
-        if not jobs:
+        syndicate_jobs = list(s.jobs or ())
+        if not syndicate_jobs:
             return event.plain_result(f"{s.name}（{platform_norm}）当前无任务。")
 
         rows: list[WorldstateRow] = []
-        for j in jobs[:18]:
+        for j in syndicate_jobs[:18]:
             node = j.node or "?"
             mtype = j.mission_type or "?"
             rows.append(
@@ -988,7 +1092,7 @@ async def cmd_syndicates(
             header_lines=[
                 f"平台：{platform_norm}",
                 f"剩余：{s.eta}",
-                f"共{len(jobs)}条（展示前{min(18, len(jobs))}条）",
+                f"共{len(syndicate_jobs)}条（展示前{min(18, len(syndicate_jobs))}条）",
             ],
             rows=rows,
             accent=(16, 185, 129, 255),
@@ -997,9 +1101,9 @@ async def cmd_syndicates(
             return event.image_result(rendered.path)
 
         lines: list[str] = [
-            f"集团 {s.name}（{platform_norm}）剩余{s.eta}：共{len(jobs)}条"
+            f"集团 {s.name}（{platform_norm}）剩余{s.eta}：共{len(syndicate_jobs)}条"
         ]
-        for j in jobs:
+        for j in syndicate_jobs:
             node = j.node or "?"
             mtype = j.mission_type or "?"
             lines.append(f"- {mtype} - {node} | 剩余{j.eta}")
@@ -1007,12 +1111,12 @@ async def cmd_syndicates(
 
     rows: list[WorldstateRow] = []
     for s in syndicates[:10]:
-        jobs: list[str] = []
+        job_summaries: list[str] = []
         for j in s.jobs[:3]:
             node = j.node or "?"
             mtype = j.mission_type or "?"
-            jobs.append(f"{mtype}-{node}")
-        subtitle = " | ".join(jobs) if jobs else None
+            job_summaries.append(f"{mtype}-{node}")
+        subtitle = " | ".join(job_summaries) if job_summaries else None
         rows.append(
             WorldstateRow(title=s.name, subtitle=subtitle, right=f"剩余{s.eta}")
         )
