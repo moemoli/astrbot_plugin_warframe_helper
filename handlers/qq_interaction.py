@@ -109,14 +109,6 @@ async def handle_qq_interaction_create(
     except Exception:
         return
 
-    if not reply_to_msg_id:
-        try:
-            cached = getattr(platform, "_session_last_message_id", None)
-            if isinstance(cached, dict):
-                reply_to_msg_id = cached.get(session_id)
-        except Exception:
-            reply_to_msg_id = None
-
     if not session_id or not sender_id:
         return
 
@@ -132,13 +124,11 @@ async def handle_qq_interaction_create(
         )
         return
 
-    # Prefer the msg_id of the original user command (stored when /wm or /wmr ran).
-    try:
-        cached_reply = str(state.get("reply_msg_id") or "").strip()
-        if cached_reply:
-            reply_to_msg_id = cached_reply
-    except Exception:
-        pass
+    # Only use the msg_id of the original user command (stored when /wm or /wmr ran).
+    reply_to_msg_id = str(state.get("reply_msg_id") or "").strip() or None
+    if not reply_to_msg_id:
+        # Do not fallback to other msg_ids (to avoid proactive messages).
+        return
 
     kind = str(state.get("kind") or "").strip().lower()
     page = int(state.get("page") or 1)

@@ -55,6 +55,8 @@ async def cmd_wfp(
         yield event.plain_result("没有可翻页的记录，请先执行 /wm 或 /wmr。")
         return
 
+    reply_msg_id = str(state.get("reply_msg_id") or "").strip() or None
+
     kind = str(state.get("kind") or "").strip().lower()
     page = int(state.get("page") or 1)
     limit = max(1, min(int(state.get("limit") or 10), 20))
@@ -66,6 +68,7 @@ async def cmd_wfp(
                     event,
                     title="翻页",
                     content="已经是第一页。",
+                    reply_to_msg_id=reply_msg_id,
                 )
                 return
             yield event.plain_result("已经是第一页。")
@@ -114,6 +117,7 @@ async def cmd_wfp(
                     event,
                     title="翻页",
                     content="没有更多结果了。",
+                    reply_to_msg_id=reply_msg_id,
                 )
                 return
             yield event.plain_result("没有更多结果了。")
@@ -139,12 +143,18 @@ async def cmd_wfp(
                     kind="/wm",
                     page=page,
                     image_path=rendered.path,
+                    reply_to_msg_id=reply_msg_id,
                 )
                 if ok:
                     return
 
                 await event.send(event.image_result(rendered.path))
-                await qq_pager.send_pager_keyboard(event, kind="/wm", page=page)
+                await qq_pager.send_pager_keyboard(
+                    event,
+                    kind="/wm",
+                    page=page,
+                    reply_to_msg_id=reply_msg_id,
+                )
                 return
             yield event.image_result(rendered.path)
             return
@@ -159,7 +169,12 @@ async def cmd_wfp(
             lines.append(f"{idx}. {o.platinum}p  {status}  {name}")
         yield event.plain_result("\n".join(lines))
         if qq_pager.enabled_for(event):
-            await qq_pager.send_pager_keyboard(event, kind="/wm", page=page)
+            await qq_pager.send_pager_keyboard(
+                event,
+                kind="/wm",
+                page=page,
+                reply_to_msg_id=reply_msg_id,
+            )
         return
 
     if kind == "wmr":
@@ -239,6 +254,7 @@ async def cmd_wfp(
                     event,
                     title="翻页",
                     content="没有更多结果了。",
+                    reply_to_msg_id=reply_msg_id,
                 )
                 return
             yield event.plain_result("没有更多结果了。")
@@ -251,12 +267,18 @@ async def cmd_wfp(
                     kind="/wmr",
                     page=page,
                     image_path=rendered.path,
+                    reply_to_msg_id=reply_msg_id,
                 )
                 if ok:
                     return
 
                 await event.send(event.image_result(rendered.path))
-                await qq_pager.send_pager_keyboard(event, kind="/wmr", page=page)
+                await qq_pager.send_pager_keyboard(
+                    event,
+                    kind="/wmr",
+                    page=page,
+                    reply_to_msg_id=reply_msg_id,
+                )
                 return
             yield event.image_result(rendered.path)
             return
@@ -278,7 +300,12 @@ async def cmd_wfp(
             )
         yield event.plain_result("\n".join(lines))
         if qq_pager.enabled_for(event):
-            await qq_pager.send_pager_keyboard(event, kind="/wmr", page=page)
+            await qq_pager.send_pager_keyboard(
+                event,
+                kind="/wmr",
+                page=page,
+                reply_to_msg_id=reply_msg_id,
+            )
         return
 
     yield event.plain_result("当前记录不支持翻页，请重新执行 /wm 或 /wmr。")

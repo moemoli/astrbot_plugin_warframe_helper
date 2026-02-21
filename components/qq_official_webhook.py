@@ -56,13 +56,14 @@ class QQOfficialWebhookPager:
         image_path: str,
         title: str = "Warframe 助手",
         hint: str = "使用下方按钮：上一页 / 下一页",
+        reply_to_msg_id: str | None = None,
     ) -> bool:
         """Send ONE message: markdown (with embedded image) + keyboard.
 
         Requires `public_base_url` so QQ can fetch the image URL.
         """
 
-        if not self.enabled_for(event):
+        if not self.keyboard_enabled_for(event):
             return False
 
         if not self._public_base_url:
@@ -92,7 +93,136 @@ class QQOfficialWebhookPager:
             image_width=image_w,
             image_height=image_h,
             image_markdown=image_markdown,
+            reply_to_msg_id=reply_to_msg_id,
         )
+
+    async def send_result_markdown_no_keyboard(
+        self,
+        event: AstrMessageEvent,
+        *,
+        kind: str,
+        image_path: str,
+        title: str,
+        reply_to_msg_id: str | None = None,
+    ) -> bool:
+        """Send ONE message: markdown (with embedded image) without keyboard."""
+
+        if not self.enabled_for(event):
+            return False
+
+        if not self._public_base_url:
+            logger.warning(
+                "QQ markdown-with-image requires `webhook_public_base_url` to be configured."
+            )
+            return False
+
+        token = await self._register_file_token(image_path)
+        if not token:
+            return False
+        image_url = self._build_public_file_url(token)
+        if not image_url:
+            return False
+
+        size = self._get_image_size(image_path)
+        image_w, image_h = size if size else (1280, 720)
+        image_markdown = self._build_markdown_image(image_url, image_path=image_path)
+
+        return await self._send_markdown_only_image(
+            event,
+            title=title,
+            kind=kind,
+            image_url=image_url,
+            image_width=image_w,
+            image_height=image_h,
+            image_markdown=image_markdown,
+            reply_to_msg_id=reply_to_msg_id,
+        )
+
+    async def send_markdown_text(
+        self,
+        event: AstrMessageEvent,
+        *,
+        title: str,
+        content: str,
+        reply_to_msg_id: str | None = None,
+    ) -> bool:
+        """Send ONE markdown message using markdown.content (no keyboard)."""
+
+        if not self.enabled_for(event):
+            return False
+
+        self._maybe_hook_interactions(event)
+
+        bot = getattr(event, "bot", None)
+        if not bot or not getattr(bot, "api", None):
+            return False
+
+        try:
+            from botpy.http import Route
+            from botpy.interaction import Interaction
+            from botpy.message import C2CMessage, DirectMessage, GroupMessage, Message
+        except Exception:
+            return False
+
+        source = getattr(event.message_obj, "raw_message", None)
+
+        md_title = str(title).strip() or "提示"
+        body = str(content or "").strip()
+        markdown: dict = {
+            "content": f"# {md_title}\n\n{body}" if body else f"# {md_title}",
+        }
+
+        msg_id = reply_to_msg_id or getattr(event.message_obj, "message_id", None)
+
+        payload: dict = {
+            "content": " ",
+            "msg_type": 2,
+            "markdown": markdown,
+        }
+
+        if msg_id:
+            payload["msg_id"] = msg_id
+            payload["msg_seq"] = random.randint(1, 10000)
+
+        try:
+            if isinstance(source, GroupMessage):
+                group_openid = getattr(source, "group_openid", None)
+                if not group_openid:
+                    return False
+                route = Route(
+                    "POST",
+                    "/v2/groups/{group_openid}/messages",
+                    group_openid=group_openid,
+                )
+            elif isinstance(source, C2CMessage):
+                openid = getattr(getattr(source, "author", None), "user_openid", None)
+                if not openid:
+                    return False
+                route = Route("POST", "/v2/users/{openid}/messages", openid=openid)
+            elif isinstance(source, Message):
+                channel_id = getattr(source, "channel_id", None)
+                if not channel_id:
+                    return False
+                route = Route(
+                    "POST",
+                    "/channels/{channel_id}/messages",
+                    channel_id=channel_id,
+                )
+            elif isinstance(source, DirectMessage):
+                guild_id = getattr(source, "guild_id", None)
+                if not guild_id:
+                    return False
+                route = Route("POST", "/dms/{guild_id}/messages", guild_id=guild_id)
+            elif isinstance(source, Interaction):
+                return False
+            else:
+                return False
+
+            await bot.api._http.request(route, json=payload)
+            return True
+        except Exception as exc:
+            logger.warning(f"QQ markdown text send failed: {exc!s}")
+            return False
 
     async def send_result_markdown_with_keyboard_interaction(
         self,
@@ -181,6 +311,7 @@ class QQOfficialWebhookPager:
         image_width: int,
         image_height: int,
         image_markdown: str,
+        reply_to_msg_id: str | None,
     ) -> bool:
         """Low-level send: markdown + keyboard (event path)."""
 
@@ -206,7 +337,7 @@ class QQOfficialWebhookPager:
                 "params": [
                     {"key": "title", "values": [str(title).strip() or "Warframe 助手"]},
                     {"key": "kind", "values": [str(kind)]},
-                    {"key": "page", "values": [str(page_norm)]},
+                    {"key": "page", "values": [f"第{page_norm}页"]},
                     {"key": "hint", "values": [str(hint)]},
                     {"key": "image", "values": [str(image_url)]},
                     {"key": "image_w", "values": [str(max(1, int(image_width)))]},
@@ -231,7 +362,7 @@ class QQOfficialWebhookPager:
             else build_plain_markdown()
         )
 
-        msg_id = getattr(event.message_obj, "message_id", None)
+        msg_id = reply_to_msg_id or getattr(event.message_obj, "message_id", None)
         payload: dict = {
             "content": " ",
             "msg_type": 2,
@@ -335,7 +466,7 @@ class QQOfficialWebhookPager:
                 "params": [
                     {"key": "title", "values": [str(title).strip() or "Warframe 助手"]},
                     {"key": "kind", "values": [str(kind)]},
-                    {"key": "page", "values": [str(page_norm)]},
+                    {"key": "page", "values": [f"第{page_norm}页"]},
                     {"key": "hint", "values": [str(hint)]},
                     {"key": "image", "values": [str(image_url)]},
                     {"key": "image_w", "values": [str(max(1, int(image_width)))]},
@@ -421,6 +552,127 @@ class QQOfficialWebhookPager:
             logger.warning(f"QQ markdown+keyboard send failed (interaction): {exc!s}")
             return False
 
+    async def _send_markdown_only_image(
+        self,
+        event: AstrMessageEvent,
+        *,
+        title: str,
+        kind: str,
+        image_url: str,
+        image_width: int,
+        image_height: int,
+        image_markdown: str,
+        reply_to_msg_id: str | None,
+    ) -> bool:
+        """Low-level send: markdown with embedded image, without keyboard."""
+
+        self._maybe_hook_interactions(event)
+
+        bot = getattr(event, "bot", None)
+        if not bot or not getattr(bot, "api", None):
+            return False
+
+        try:
+            from botpy.http import Route
+            from botpy.interaction import Interaction
+            from botpy.message import C2CMessage, DirectMessage, GroupMessage, Message
+        except Exception:
+            return False
+
+        source = getattr(event.message_obj, "raw_message", None)
+
+        def build_template_markdown() -> dict:
+            return {
+                "custom_template_id": self._markdown_template_id,
+                "params": [
+                    {"key": "title", "values": [str(title).strip() or "Warframe 助手"]},
+                    {"key": "kind", "values": [str(kind)]},
+                    {"key": "page", "values": [" "]},
+                    {"key": "hint", "values": [" "]},
+                    {"key": "image", "values": [str(image_url)]},
+                    {"key": "image_w", "values": [str(max(1, int(image_width)))]},
+                    {"key": "image_h", "values": [str(max(1, int(image_height)))]},
+                ],
+            }
+
+        def build_plain_markdown() -> dict:
+            image_md = (
+                str(image_markdown or "").strip() or f"![result]({str(image_url)})"
+            )
+            md = f"# {str(title).strip() or 'Warframe 助手'}\n\n{image_md}"
+            return {"content": md}
+
+        markdown: dict = (
+            build_template_markdown()
+            if self._markdown_template_id
+            else build_plain_markdown()
+        )
+
+        msg_id = reply_to_msg_id or getattr(event.message_obj, "message_id", None)
+        payload: dict = {
+            "content": " ",
+            "msg_type": 2,
+            "markdown": markdown,
+        }
+
+        if msg_id:
+            payload["msg_id"] = msg_id
+            payload["msg_seq"] = random.randint(1, 10000)
+
+        try:
+            if isinstance(source, GroupMessage):
+                group_openid = getattr(source, "group_openid", None)
+                if not group_openid:
+                    return False
+                route = Route(
+                    "POST",
+                    "/v2/groups/{group_openid}/messages",
+                    group_openid=group_openid,
+                )
+            elif isinstance(source, C2CMessage):
+                openid = getattr(getattr(source, "author", None), "user_openid", None)
+                if not openid:
+                    return False
+                route = Route("POST", "/v2/users/{openid}/messages", openid=openid)
+            elif isinstance(source, Message):
+                channel_id = getattr(source, "channel_id", None)
+                if not channel_id:
+                    return False
+                route = Route(
+                    "POST",
+                    "/channels/{channel_id}/messages",
+                    channel_id=channel_id,
+                )
+            elif isinstance(source, DirectMessage):
+                guild_id = getattr(source, "guild_id", None)
+                if not guild_id:
+                    return False
+                route = Route("POST", "/dms/{guild_id}/messages", guild_id=guild_id)
+            elif isinstance(source, Interaction):
+                return False
+            else:
+                return False
+
+            await bot.api._http.request(route, json=payload)
+            return True
+        except Exception as exc:
+            if self._markdown_template_id:
+                try:
+                    payload_fallback = dict(payload)
+                    payload_fallback["markdown"] = build_plain_markdown()
+                    await bot.api._http.request(route, json=payload_fallback)
+                    return True
+                except Exception as exc2:
+                    logger.warning(
+                        "QQ markdown image send failed: %s; fallback failed: %s",
+                        str(exc),
+                        str(exc2),
+                    )
+                    return False
+
+            logger.warning(f"QQ markdown image send failed: {exc!s}")
+            return False
+
     @property
     def enable_markdown_reply(self) -> bool:
         return self._enable_markdown_reply
@@ -432,7 +684,8 @@ class QQOfficialWebhookPager:
         self._interaction_handler = handler
 
     def _maybe_hook_interactions(self, event: AstrMessageEvent) -> None:
-        if not self._interaction_handler:
+        interaction_handler = self._interaction_handler
+        if not interaction_handler:
             return
 
         bot = getattr(event, "bot", None)
@@ -448,12 +701,16 @@ class QQOfficialWebhookPager:
         async def on_interaction_create(interaction):
             if callable(prev) and prev is not on_interaction_create:
                 try:
-                    await prev(interaction)
+                    import inspect
+
+                    maybe_awaitable = prev(interaction)
+                    if inspect.isawaitable(maybe_awaitable):
+                        await maybe_awaitable
                 except Exception as exc:
                     logger.warning(f"QQ interaction prev handler failed: {exc!s}")
 
             try:
-                await self._interaction_handler(bot, interaction)
+                await interaction_handler(bot, interaction)
             except Exception as exc:
                 logger.warning(f"QQ interaction handler failed: {exc!s}")
 
@@ -469,12 +726,13 @@ class QQOfficialWebhookPager:
     def enabled_for(self, event: AstrMessageEvent) -> bool:
         if not self._enable_markdown_reply:
             return False
-        if not self._keyboard_template_id:
-            return False
         try:
             return event.get_platform_name() == "qq_official_webhook"
         except Exception:
             return False
+
+    def keyboard_enabled_for(self, event: AstrMessageEvent) -> bool:
+        return self.enabled_for(event) and bool(self._keyboard_template_id)
 
     async def send_pager_keyboard(
         self,
@@ -482,13 +740,14 @@ class QQOfficialWebhookPager:
         *,
         kind: str,
         page: int,
+        reply_to_msg_id: str | None = None,
     ) -> None:
         """Send a markdown message with a keyboard template (buttons) on QQ official webhook.
 
         This bypasses AstrBot's generic send path, so it does not affect other platforms.
         """
 
-        if not self.enabled_for(event):
+        if not self.keyboard_enabled_for(event):
             return
 
         self._maybe_hook_interactions(event)
@@ -519,7 +778,7 @@ class QQOfficialWebhookPager:
                 "params": [
                     {"key": "title", "values": ["Warframe 助手"]},
                     {"key": "kind", "values": [str(kind)]},
-                    {"key": "page", "values": [str(page_norm)]},
+                    {"key": "page", "values": [f"第{page_norm}页"]},
                     {"key": "hint", "values": ["使用下方按钮：上一页 / 下一页"]},
                 ],
             }
@@ -533,7 +792,7 @@ class QQOfficialWebhookPager:
             else build_plain_markdown()
         )
 
-        msg_id = getattr(event.message_obj, "message_id", None)
+        msg_id = reply_to_msg_id or getattr(event.message_obj, "message_id", None)
 
         payload: dict = {
             # QQ v2 send message schema may require `content` even for markdown.
@@ -636,7 +895,7 @@ class QQOfficialWebhookPager:
                 "params": [
                     {"key": "title", "values": ["Warframe 助手"]},
                     {"key": "kind", "values": [str(kind)]},
-                    {"key": "page", "values": [str(page_norm)]},
+                    {"key": "page", "values": [f"第{page_norm}页"]},
                     {"key": "hint", "values": ["使用下方按钮：上一页 / 下一页"]},
                 ],
             }
@@ -718,6 +977,7 @@ class QQOfficialWebhookPager:
         *,
         title: str,
         content: str,
+        reply_to_msg_id: str | None = None,
     ) -> None:
         """Send a markdown message (template preferred) without keyboard.
 
@@ -764,7 +1024,7 @@ class QQOfficialWebhookPager:
             else build_plain_markdown()
         )
 
-        msg_id = getattr(event.message_obj, "message_id", None)
+        msg_id = reply_to_msg_id or getattr(event.message_obj, "message_id", None)
 
         payload: dict = {
             "content": " ",

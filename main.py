@@ -1,5 +1,8 @@
+from collections.abc import Sequence
+
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, register
 from astrbot.core.star.filter.command import GreedyStr
 
@@ -121,6 +124,87 @@ class WarframeHelperPlugin(Star):
         )
         return
 
+    def _extract_plain_from_result(self, result) -> str:
+        chain = getattr(result, "chain", None)
+        if not isinstance(chain, list) or not chain:
+            return ""
+        parts: list[str] = []
+        for comp in chain:
+            if isinstance(comp, Plain):
+                parts.append(str(getattr(comp, "text", "") or ""))
+        return "".join(parts).strip()
+
+    def _extract_image_path_from_result(self, result) -> str:
+        chain = getattr(result, "chain", None)
+        if not isinstance(chain, list) or not chain:
+            return ""
+        for comp in chain:
+            if not isinstance(comp, Image):
+                continue
+            path = str(getattr(comp, "path", "") or "").strip()
+            if path:
+                return path
+            file_url = str(getattr(comp, "file", "") or "").strip()
+            if file_url.startswith("file:///"):
+                return file_url[8:]
+        return ""
+
+    def _extract_image_path_from_chain(self, chain: Sequence[object]) -> str:
+        if not chain:
+            return ""
+        for comp in chain:
+            if not isinstance(comp, Image):
+                continue
+            path = str(getattr(comp, "path", "") or "").strip()
+            if path:
+                return path
+            file_url = str(getattr(comp, "file", "") or "").strip()
+            if file_url.startswith("file:///"):
+                return file_url[8:]
+        return ""
+
+    async def _try_send_qq_markdown_for_result(
+        self,
+        *,
+        event: AstrMessageEvent,
+        result,
+        title: str,
+        kind: str,
+        prefer_keyboard: bool = False,
+        page: int = 1,
+        hint: str = "使用下方按钮：上一页 / 下一页",
+    ) -> bool:
+        if not self._qq_pager.enabled_for(event):
+            return False
+
+        image_path = self._extract_image_path_from_result(result)
+        if image_path:
+            if prefer_keyboard and self._qq_pager.keyboard_enabled_for(event):
+                return await self._qq_pager.send_result_markdown_with_keyboard(
+                    event,
+                    kind=kind,
+                    page=page,
+                    image_path=image_path,
+                    title=title,
+                    hint=hint,
+                )
+            return await self._qq_pager.send_result_markdown_no_keyboard(
+                event,
+                kind=kind,
+                image_path=image_path,
+                title=title,
+            )
+
+        text = self._extract_plain_from_result(result)
+        if text:
+            return await self._qq_pager.send_markdown_text(
+                event,
+                title=title,
+                content=text,
+            )
+
+        return False
+
     @filter.command("订阅")
     async def wf_subscribe(
         self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()
@@ -136,9 +220,41 @@ class WarframeHelperPlugin(Star):
         raw_args = str(args)
         msg, chain = await self._subscriptions.subscribe(event=event, raw_args=raw_args)
         if chain is not None:
+            if self._qq_pager.enabled_for(event):
+                image_path = self._extract_image_path_from_chain(chain.chain)
+                if image_path:
+                    ok = await self._qq_pager.send_result_markdown_no_keyboard(
+                        event,
+                        kind="/订阅",
+                        image_path=image_path,
+                        title="订阅列表",
+                    )
+                    if ok:
+                        yield event.make_result().stop_event()
+                        return
+                else:
+                    plain = chain.get_plain_text()
+                    ok = await self._qq_pager.send_markdown_text(
+                        event,
+                        title="订阅",
+                        content=plain,
+                    )
+                    if ok:
+                        yield event.make_result().stop_event()
+                        return
+
             yield event.chain_result(chain.chain)
             return
         if msg:
+            if self._qq_pager.enabled_for(event):
+                ok = await self._qq_pager.send_markdown_text(
+                    event,
+                    title="订阅",
+                    content=msg,
+                )
+                if ok:
+                    yield event.make_result().stop_event()
+                    return
             yield event.plain_result(msg)
             return
 
@@ -155,6 +271,15 @@ class WarframeHelperPlugin(Star):
         event.should_call_llm(False)
 
         msg = await self._subscriptions.unsubscribe(event=event, raw_args=str(args))
+        if self._qq_pager.enabled_for(event):
+            ok = await self._qq_pager.send_markdown_text(
+                event,
+                title="退订",
+                content=msg,
+            )
+            if ok:
+                yield event.make_result().stop_event()
+                return
         yield event.plain_result(msg)
 
     @filter.command("订阅列表")
@@ -163,6 +288,27 @@ class WarframeHelperPlugin(Star):
 
         event.should_call_llm(False)
         chain = await self._subscriptions.render_list(event=event)
+        if self._qq_pager.enabled_for(event):
+            image_path = self._extract_image_path_from_chain(chain.chain)
+            if image_path:
+                ok = await self._qq_pager.send_result_markdown_no_keyboard(
+                    event,
+                    kind="/订阅列表",
+                    image_path=image_path,
+                    title="订阅列表",
+                )
+                if ok:
+                    yield event.make_result().stop_event()
+                    return
+            else:
+                ok = await self._qq_pager.send_markdown_text(
+                    event,
+                    title="订阅列表",
+                    content=chain.get_plain_text(),
+                )
+                if ok:
+                    yield event.make_result().stop_event()
+                    return
         yield event.chain_result(chain.chain)
 
     @filter.command("执行官猎杀", alias={"archon", "执行官"})
@@ -177,6 +323,14 @@ class WarframeHelperPlugin(Star):
             raw_args=str(args),
             worldstate_client=self.worldstate_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="执行官猎杀",
+            kind="/执行官猎杀",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("钢铁奖励", alias={"steelreward", "sp奖励"})
@@ -191,6 +345,14 @@ class WarframeHelperPlugin(Star):
             raw_args=str(args),
             worldstate_client=self.worldstate_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="钢铁奖励",
+            kind="/钢铁奖励",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
@@ -212,12 +374,28 @@ class WarframeHelperPlugin(Star):
             accent=(79, 70, 229, 255),
         )
         if rendered:
-            yield event.image_result(rendered.path)
+            result = event.image_result(rendered.path)
+            if await self._try_send_qq_markdown_for_result(
+                event=event,
+                result=result,
+                title="Warframe Helper",
+                kind="/helloworld",
+            ):
+                yield event.make_result().stop_event()
+                return
+            yield result
             return
 
-        yield event.plain_result(
-            f"Hello, {user_name}, 你发了 {message_str}!"
-        )  # 发送一条纯文本消息
+        text_result = event.plain_result(f"Hello, {user_name}, 你发了 {message_str}!")
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=text_result,
+            title="Warframe Helper",
+            kind="/helloworld",
+        ):
+            yield event.make_result().stop_event()
+            return
+        yield text_result  # 发送一条纯文本消息
 
     @filter.command("wfmap", alias={"wf映射"})
     async def wfmap(self, event: AstrMessageEvent, query: str = ""):
@@ -225,7 +403,16 @@ class WarframeHelperPlugin(Star):
         event.should_call_llm(False)
         query = (query or "").strip()
         if not query:
-            yield event.plain_result("用法：/wfmap 猴p")
+            result = event.plain_result("用法：/wfmap 猴p")
+            if await self._try_send_qq_markdown_for_result(
+                event=event,
+                result=result,
+                title="WF 映射",
+                kind="/wfmap",
+            ):
+                yield event.make_result().stop_event()
+                return
+            yield result
             return
 
         item = await self.term_mapper.resolve_with_ai(
@@ -237,7 +424,16 @@ class WarframeHelperPlugin(Star):
             ),
         )
         if not item:
-            yield event.plain_result(f"未找到可映射的词条：{query}")
+            result = event.plain_result(f"未找到可映射的词条：{query}")
+            if await self._try_send_qq_markdown_for_result(
+                event=event,
+                result=result,
+                title="WF 映射",
+                kind="/wfmap",
+            ):
+                yield event.make_result().stop_event()
+                return
+            yield result
             return
 
         header = [f"{query} -> {item.name}", f"slug: {item.slug}"]
@@ -253,11 +449,29 @@ class WarframeHelperPlugin(Star):
             accent=(79, 70, 229, 255),
         )
         if rendered:
-            yield event.image_result(rendered.path)
+            result = event.image_result(rendered.path)
+            if await self._try_send_qq_markdown_for_result(
+                event=event,
+                result=result,
+                title="WF 映射",
+                kind="/wfmap",
+            ):
+                yield event.make_result().stop_event()
+                return
+            yield result
             return
 
         extra = f"\nWiki: {item.wiki_link}" if item.wiki_link else ""
-        yield event.plain_result(f"{query} -> {item.name} ({item.slug}){extra}")
+        result = event.plain_result(f"{query} -> {item.name} ({item.slug}){extra}")
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="WF 映射",
+            kind="/wfmap",
+        ):
+            yield event.make_result().stop_event()
+            return
+        yield result
 
     @filter.command("wm")
     async def wm(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
@@ -280,6 +494,17 @@ class WarframeHelperPlugin(Star):
             wm_pick_cache=self._wm_pick_cache,
             qq_pager=self._qq_pager,
         ):
+            if self._qq_pager.enabled_for(event) and self._extract_plain_from_result(
+                res
+            ):
+                ok = await self._qq_pager.send_markdown_text(
+                    event,
+                    title="wm",
+                    content=self._extract_plain_from_result(res),
+                )
+                if ok:
+                    yield event.make_result().stop_event()
+                    return
             yield res
 
     @filter.command("wmr")
@@ -300,6 +525,17 @@ class WarframeHelperPlugin(Star):
             pager_cache=self._pager_cache,
             qq_pager=self._qq_pager,
         ):
+            if self._qq_pager.enabled_for(event) and self._extract_plain_from_result(
+                res
+            ):
+                ok = await self._qq_pager.send_markdown_text(
+                    event,
+                    title="wmr",
+                    content=self._extract_plain_from_result(res),
+                )
+                if ok:
+                    yield event.make_result().stop_event()
+                    return
             yield res
 
     @filter.command("wfp")
@@ -320,6 +556,17 @@ class WarframeHelperPlugin(Star):
             market_client=self.market_client,
             qq_pager=self._qq_pager,
         ):
+            if self._qq_pager.enabled_for(event) and self._extract_plain_from_result(
+                res
+            ):
+                ok = await self._qq_pager.send_markdown_text(
+                    event,
+                    title="wfp",
+                    content=self._extract_plain_from_result(res),
+                )
+                if ok:
+                    yield event.make_result().stop_event()
+                    return
             yield res
 
     @filter.regex(r"^(上一页|下一页|prev|previous|next)$")
@@ -330,7 +577,7 @@ class WarframeHelperPlugin(Star):
         This handler converts them into /wfp prev|next.
         """
 
-        if not self._qq_pager.enabled_for(event):
+        if not self._qq_pager.keyboard_enabled_for(event):
             return
 
         try:
@@ -358,6 +605,17 @@ class WarframeHelperPlugin(Star):
             event=event,
             wm_pick_cache=self._wm_pick_cache,
         ):
+            if self._qq_pager.enabled_for(event) and self._extract_plain_from_result(
+                res
+            ):
+                ok = await self._qq_pager.send_markdown_text(
+                    event,
+                    title="wm",
+                    content=self._extract_plain_from_result(res),
+                )
+                if ok:
+                    yield event.make_result().stop_event()
+                    return
             yield res
 
     @filter.command("突击", alias={"sortie"})
@@ -370,6 +628,14 @@ class WarframeHelperPlugin(Star):
             raw_args=str(args),
             worldstate_client=self.worldstate_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="突击",
+            kind="/突击",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("警报", alias={"alerts"})
@@ -382,6 +648,14 @@ class WarframeHelperPlugin(Star):
             raw_args=str(args),
             worldstate_client=self.worldstate_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="警报",
+            kind="/警报",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("裂缝", alias={"fissure"})
@@ -394,6 +668,14 @@ class WarframeHelperPlugin(Star):
             raw_args=str(args),
             worldstate_client=self.worldstate_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="裂缝",
+            kind="/裂缝",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("九重天裂缝", alias={"风暴裂缝"})
@@ -408,6 +690,14 @@ class WarframeHelperPlugin(Star):
             worldstate_client=self.worldstate_client,
             fissure_kind="九重天",
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="裂缝",
+            kind="/九重天裂缝",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("钢铁裂缝")
@@ -422,6 +712,14 @@ class WarframeHelperPlugin(Star):
             worldstate_client=self.worldstate_client,
             fissure_kind="钢铁",
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="裂缝",
+            kind="/钢铁裂缝",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("普通裂缝")
@@ -436,6 +734,14 @@ class WarframeHelperPlugin(Star):
             worldstate_client=self.worldstate_client,
             fissure_kind="普通",
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="裂缝",
+            kind="/普通裂缝",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("奸商", alias={"虚空商人", "baro"})
@@ -450,6 +756,14 @@ class WarframeHelperPlugin(Star):
             raw_args=str(args),
             worldstate_client=self.worldstate_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="奸商",
+            kind="/奸商",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("仲裁", alias={"arbitration"})
@@ -464,6 +778,14 @@ class WarframeHelperPlugin(Star):
             raw_args=str(args),
             worldstate_client=self.worldstate_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="仲裁",
+            kind="/仲裁",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("电波", alias={"夜波", "nightwave"})
@@ -478,6 +800,14 @@ class WarframeHelperPlugin(Star):
             raw_args=str(args),
             worldstate_client=self.worldstate_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="电波",
+            kind="/电波",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("平原")
@@ -494,6 +824,14 @@ class WarframeHelperPlugin(Star):
             raw_args=str(args),
             worldstate_client=self.worldstate_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="平原状态",
+            kind="/平原",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("夜灵平原", alias={"希图斯", "cetus", "poe"})
@@ -509,6 +847,14 @@ class WarframeHelperPlugin(Star):
             worldstate_client=self.worldstate_client,
             cycle="cetus",
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="夜灵平原",
+            kind="/夜灵平原",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("魔胎之境", alias={"魔胎", "cambion"})
@@ -524,6 +870,14 @@ class WarframeHelperPlugin(Star):
             worldstate_client=self.worldstate_client,
             cycle="cambion",
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="魔胎之境",
+            kind="/魔胎之境",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("地球昼夜", alias={"地球循环", "地球", "earth"})
@@ -539,6 +893,14 @@ class WarframeHelperPlugin(Star):
             worldstate_client=self.worldstate_client,
             cycle="earth",
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="地球昼夜",
+            kind="/地球昼夜",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command(
@@ -557,6 +919,14 @@ class WarframeHelperPlugin(Star):
             worldstate_client=self.worldstate_client,
             cycle="vallis",
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="奥布山谷",
+            kind="/奥布山谷",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("双衍王境", alias={"双衍", "双衍循环", "双衍王镜", "duviri"})
@@ -572,6 +942,14 @@ class WarframeHelperPlugin(Star):
             worldstate_client=self.worldstate_client,
             cycle="duviri",
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="双衍王境",
+            kind="/双衍王境",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("轮回奖励", alias={"双衍轮回", "双衍轮回奖励", "circuit"})
@@ -586,6 +964,14 @@ class WarframeHelperPlugin(Star):
             raw_args=str(args),
             worldstate_client=self.worldstate_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="轮回奖励",
+            kind="/轮回奖励",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("武器", alias={"weapon", "wfweapon"})
@@ -598,6 +984,14 @@ class WarframeHelperPlugin(Star):
             query=str(args),
             public_export_client=self.public_export_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="武器",
+            kind="/武器",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("战甲", alias={"warframe", "frame", "wfwarframe"})
@@ -610,6 +1004,14 @@ class WarframeHelperPlugin(Star):
             query=str(args),
             public_export_client=self.public_export_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="战甲",
+            kind="/战甲",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("MOD", alias={"mod", "模组", "mods"})
@@ -622,6 +1024,14 @@ class WarframeHelperPlugin(Star):
             query=str(args),
             public_export_client=self.public_export_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="MOD",
+            kind="/MOD",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("掉落", alias={"drop", "drops"})
@@ -635,6 +1045,14 @@ class WarframeHelperPlugin(Star):
             drop_data_client=self.drop_data_client,
             public_export_client=self.public_export_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="掉落",
+            kind="/掉落",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("遗物", alias={"relic", "relics"})
@@ -647,6 +1065,14 @@ class WarframeHelperPlugin(Star):
             raw_args=str(args),
             drop_data_client=self.drop_data_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="遗物",
+            kind="/遗物",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("入侵", alias={"invasions"})
@@ -661,6 +1087,14 @@ class WarframeHelperPlugin(Star):
             raw_args=str(args),
             worldstate_client=self.worldstate_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="入侵",
+            kind="/入侵",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
 
     @filter.command("集团", alias={"syndicate", "syndicates"})
@@ -682,4 +1116,12 @@ class WarframeHelperPlugin(Star):
             raw_args=str(args),
             worldstate_client=self.worldstate_client,
         )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="集团",
+            kind="/集团",
+        ):
+            yield event.make_result().stop_event()
+            return
         yield result
