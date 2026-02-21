@@ -22,6 +22,13 @@ OFFICIAL_WORLDSTATE_URLS: list[str] = [
 ]
 
 
+def _worldstate_urls(platform: Platform) -> list[str]:
+    platform_norm = (platform or "pc").strip().lower()
+    if platform_norm and platform_norm != "pc":
+        return [f"{u}?platform={platform_norm}" for u in OFFICIAL_WORLDSTATE_URLS]
+    return list(OFFICIAL_WORLDSTATE_URLS)
+
+
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -103,6 +110,46 @@ def _env_epoch(name: str, default: int) -> int:
         return int(raw)
     except Exception:
         return int(default)
+
+
+def _normalize_cycle_state(
+    state: str | None, *, day_name: str | None, night_name: str | None
+) -> str | None:
+    if not isinstance(state, str) or not state.strip():
+        return None
+    s = state.strip().lower()
+    if day_name and s in {"day", "daytime"}:
+        return day_name
+    if night_name and s in {"night", "nighttime"}:
+        return night_name
+    return state.strip()
+
+
+def _try_read_cycle(
+    ws: dict,
+    *,
+    key: str,
+    day_name: str | None = None,
+    night_name: str | None = None,
+) -> tuple[str | None, bool | None, datetime | None]:
+    cycle = ws.get(key)
+    if not isinstance(cycle, dict):
+        return None, None, None
+
+    expiry = _parse_ws_date(
+        cycle.get("expiry")
+        or cycle.get("Expiry")
+        or cycle.get("endTime")
+        or cycle.get("EndTime")
+    )
+    state_raw = cycle.get("state") if isinstance(cycle.get("state"), str) else None
+    is_day = cycle.get("isDay") if isinstance(cycle.get("isDay"), bool) else None
+
+    state = _normalize_cycle_state(state_raw, day_name=day_name, night_name=night_name)
+    if state is None and isinstance(is_day, bool) and day_name and night_name:
+        state = day_name if is_day else night_name
+
+    return state, is_day, expiry
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,6 +382,7 @@ class WarframeWorldstateClient:
         self._epoch_vallis = _env_epoch("ASTRBOT_WF_VALLIS_EPOCH", 0)
         self._epoch_earth = _env_epoch("ASTRBOT_WF_EARTH_EPOCH", 0)
         self._epoch_duviri = _env_epoch("ASTRBOT_WF_DUVIRI_EPOCH", 0)
+        self._warned_arbitration = False
 
     def _cache_get(self, key: str) -> Any | None:
         rec = self._cache.get(key)
@@ -358,7 +406,7 @@ class WarframeWorldstateClient:
             return cached
 
         data = await fetch_json(
-            OFFICIAL_WORLDSTATE_URLS, timeout_sec=self._http_timeout_sec
+            _worldstate_urls(platform_norm), timeout_sec=self._http_timeout_sec
         )
         if data is None:
             return None
@@ -830,9 +878,11 @@ class WarframeWorldstateClient:
     async def fetch_arbitration(
         self, *, platform: Platform = "pc", language: str = "zh"
     ) -> ArbitrationInfo | None:
-        logger.warning(
-            "Official worldState does not expose arbitration data currently; returning None"
-        )
+        if not self._warned_arbitration:
+            logger.info(
+                "Official worldState does not expose arbitration data currently; returning None"
+            )
+            self._warned_arbitration = True
         return None
 
     async def fetch_nightwave(
@@ -967,6 +1017,23 @@ class WarframeWorldstateClient:
             server_sec = int(time.time())
         server_dt = datetime.fromtimestamp(server_sec, tz=timezone.utc)
 
+        state, is_day, expiry = _try_read_cycle(
+            ws,
+            key="EarthCycle",
+            day_name="白天",
+            night_name="夜晚",
+        )
+        if expiry and state:
+            left_sec = int((expiry - server_dt).total_seconds())
+            return EarthCycleInfo(
+                state=state,
+                is_day=is_day if is_day is not None else (state == "白天"),
+                time_left=_format_time_left(left_sec),
+                eta=_format_eta_from_dt(expiry),
+                start_time=None,
+                end_time=_format_dt_local(expiry),
+            )
+
         # Earth: 4h day + 4h night
         res = _compute_two_phase_cycle(
             server_dt,
@@ -998,6 +1065,23 @@ class WarframeWorldstateClient:
         if not isinstance(server_sec, int):
             server_sec = int(time.time())
         server_dt = datetime.fromtimestamp(server_sec, tz=timezone.utc)
+
+        state, is_day, expiry = _try_read_cycle(
+            ws,
+            key="CetusCycle",
+            day_name="白天",
+            night_name="夜晚",
+        )
+        if expiry and state:
+            left_sec = int((expiry - server_dt).total_seconds())
+            return CetusCycleInfo(
+                state=state,
+                is_day=is_day if is_day is not None else (state == "白天"),
+                time_left=_format_time_left(left_sec),
+                eta=_format_eta_from_dt(expiry),
+                start_time=None,
+                end_time=_format_dt_local(expiry),
+            )
 
         # Cetus: 100m day + 50m night
         res = _compute_two_phase_cycle(
@@ -1031,6 +1115,18 @@ class WarframeWorldstateClient:
             server_sec = int(time.time())
         server_dt = datetime.fromtimestamp(server_sec, tz=timezone.utc)
 
+        state, _, expiry = _try_read_cycle(ws, key="CambionCycle")
+        if expiry and state:
+            left_sec = int((expiry - server_dt).total_seconds())
+            return CambionCycleInfo(
+                state=state,
+                active=state,
+                time_left=_format_time_left(left_sec),
+                eta=_format_eta_from_dt(expiry),
+                start_time=None,
+                end_time=_format_dt_local(expiry),
+            )
+
         # Cambion: Fass 100m + Vome 50m
         res = _compute_two_phase_cycle(
             server_dt,
@@ -1061,6 +1157,19 @@ class WarframeWorldstateClient:
         if not isinstance(server_sec, int):
             server_sec = int(time.time())
         server_dt = datetime.fromtimestamp(server_sec, tz=timezone.utc)
+
+        state, _, expiry = _try_read_cycle(ws, key="VallisCycle")
+        if expiry and state:
+            left_sec = int((expiry - server_dt).total_seconds())
+            is_warm = str(state).strip().lower() in {"温暖", "warm"}
+            return VallisCycleInfo(
+                state=state,
+                is_warm=is_warm,
+                time_left=_format_time_left(left_sec),
+                eta=_format_eta_from_dt(expiry),
+                start_time=None,
+                end_time=_format_dt_local(expiry),
+            )
 
         # Vallis: warm 6m40s + cold 20m
         res = _compute_two_phase_cycle(
@@ -1093,6 +1202,17 @@ class WarframeWorldstateClient:
         if not isinstance(server_sec, int):
             server_sec = int(time.time())
         server_dt = datetime.fromtimestamp(server_sec, tz=timezone.utc)
+
+        state, _, expiry = _try_read_cycle(ws, key="DuviriCycle")
+        if expiry and state:
+            left_sec = int((expiry - server_dt).total_seconds())
+            return DuviriCycleInfo(
+                state=state,
+                time_left=_format_time_left(left_sec),
+                eta=_format_eta_from_dt(expiry),
+                start_time=None,
+                end_time=_format_dt_local(expiry),
+            )
 
         # Duviri spiral: 2h per state, 5-state loop.
         now_sec = int(server_dt.timestamp())

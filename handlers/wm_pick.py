@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import Reply
 
@@ -11,15 +12,23 @@ async def handle_wm_pick_number(
 ):
     try:
         event.should_call_llm(False)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"Failed to disable LLM for wm_pick: {exc!s}")
 
     comps = event.get_messages() or []
-    if not any(isinstance(c, Reply) for c in comps):
+    reply = next((c for c in comps if isinstance(c, Reply)), None)
+    if reply is None:
+        return
+
+    if reply.sender_id and str(reply.sender_id) != str(event.get_self_id()):
         return
 
     rec = wm_pick_cache.get(event)
     if not rec:
+        return
+
+    cached_reply_id = rec.get("reply_msg_id")
+    if cached_reply_id and reply.id and str(reply.id) != str(cached_reply_id):
         return
 
     text = (event.get_message_str() or "").strip()

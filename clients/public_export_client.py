@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
-from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+from astrbot.api.star import StarTools
 
 from ..http_utils import fetch_bytes, fetch_json
 
@@ -74,11 +74,13 @@ class PublicExportClient:
         *,
         cache_ttl_sec: float = 6 * 60 * 60,
         http_timeout_sec: float = 30.0,
+        export_cache_max: int = 64,
+        map_cache_max: int = 32,
     ) -> None:
         self._cache_ttl_sec = float(cache_ttl_sec)
         self._http_timeout_sec = float(http_timeout_sec)
         self._mem_index: dict[str, PublicExportIndex] = {}
-        self._mem_exports: dict[str, Any] = {}
+        self._mem_exports: dict[str, tuple[float, Any]] = {}
         self._mem_unique_name_maps: dict[str, dict[str, str]] = {}
         self._mem_region_maps: dict[str, dict[str, str]] = {}
         self._mem_nightwave_map: dict[str, dict[str, tuple[str, int | None]]] = {}
@@ -86,6 +88,15 @@ class PublicExportClient:
         self._mem_localized_to_en: dict[str, dict[str, list[str]]] = {}
         # english slug -> localized name
         self._mem_en_to_localized: dict[str, dict[str, str]] = {}
+        self._export_cache_max = max(10, int(export_cache_max))
+        self._map_cache_max = max(10, int(map_cache_max))
+
+    def _evict_map_cache(self, cache: dict) -> None:
+        over = len(cache) - self._map_cache_max
+        if over <= 0:
+            return
+        for _ in range(over):
+            cache.pop(next(iter(cache)), None)
 
     @staticmethod
     def _has_cjk(s: str) -> bool:
@@ -149,6 +160,7 @@ class PublicExportClient:
                     out[key] = loc_name
 
         self._mem_en_to_localized[lang] = out
+        self._evict_map_cache(self._mem_en_to_localized)
         return out
 
     async def translate_display_name(
@@ -180,8 +192,8 @@ class PublicExportClient:
         return mapping.get(_slug(raw))
 
     def _base_dir(self) -> Path:
-        base = Path(get_astrbot_plugin_data_path())
-        return base / "astrbot_plugin_warframe_helper" / "public_export"
+        base = StarTools.get_data_dir("warframe_helper")
+        return base / "public_export"
 
     def _index_cache_path(self, language: str) -> Path:
         lang = (language or "zh").strip().lower() or "zh"
@@ -223,8 +235,8 @@ class PublicExportClient:
                     )
                     self._mem_index[lang] = idx
                     return idx
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"PublicExport index cache read failed: {exc!s}")
 
         idx_url = f"{PUBLIC_EXPORT_BASE}/index_{lang}.txt.lzma"
         raw = await fetch_bytes(idx_url, timeout_sec=self._http_timeout_sec)
@@ -287,24 +299,29 @@ class PublicExportClient:
             return None
 
         mem_key = f"{lang}:{filename}!{token}"
-        if mem_key in self._mem_exports:
-            return self._mem_exports[mem_key]
+        cached = self._mem_exports.get(mem_key)
+        if cached and self._is_fresh(cached[0]):
+            return cached[1]
 
         disk_path = self._export_cache_path(lang, filename, token)
         try:
             if disk_path.exists():
                 data = json.loads(disk_path.read_text("utf-8"))
-                self._mem_exports[mem_key] = data
+                self._mem_exports[mem_key] = (time.time(), data)
+                if len(self._mem_exports) > self._export_cache_max:
+                    self._mem_exports.pop(next(iter(self._mem_exports)), None)
                 return data
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"PublicExport export cache read failed: {exc!s}")
 
         url = f"{PUBLIC_EXPORT_BASE}/Manifest/{filename}!{token}"
         data = await fetch_json(url, timeout_sec=self._http_timeout_sec)
         if data is None:
             return None
 
-        self._mem_exports[mem_key] = data
+        self._mem_exports[mem_key] = (time.time(), data)
+        if len(self._mem_exports) > self._export_cache_max:
+            self._mem_exports.pop(next(iter(self._mem_exports)), None)
         try:
             disk_path.parent.mkdir(parents=True, exist_ok=True)
             disk_path.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
@@ -337,6 +354,7 @@ class PublicExportClient:
                         out[uniq] = name
 
         self._mem_region_maps[lang] = out
+        self._evict_map_cache(self._mem_region_maps)
         return out
 
     async def get_unique_name_map(self, *, language: str = "zh") -> dict[str, str]:
@@ -381,6 +399,7 @@ class PublicExportClient:
                         out.setdefault(uniq, name)
 
         self._mem_unique_name_maps[lang] = out
+        self._evict_map_cache(self._mem_unique_name_maps)
         return out
 
     async def translate_unique_name(
@@ -432,6 +451,7 @@ class PublicExportClient:
                         )
 
         self._mem_nightwave_map[lang] = out
+        self._evict_map_cache(self._mem_nightwave_map)
         return out
 
     async def search_weapon(
@@ -541,8 +561,6 @@ class PublicExportClient:
                 continue
             if any(k in r for k in ["fusionLimit", "modType", "polarity", "rarity"]):
                 out.append(r)
-            else:
-                out.append(r)
         return out
 
     async def _get_localized_to_en_map(self, *, language: str) -> dict[str, list[str]]:
@@ -570,6 +588,7 @@ class PublicExportClient:
                 arr.append(en_name)
 
         self._mem_localized_to_en[lang] = out
+        self._evict_map_cache(self._mem_localized_to_en)
         return out
 
     async def resolve_localized_to_english_candidates(

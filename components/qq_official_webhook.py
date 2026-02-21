@@ -93,6 +93,22 @@ class QQOfficialWebhookPager:
         base = self._public_base_url + "/"
         return urljoin(base, f"api/file/{file_token}")
 
+    def _resolve_interaction_msg_id(
+        self, interaction: object, reply_to_msg_id: str | None
+    ) -> str | None:
+        if reply_to_msg_id:
+            return str(reply_to_msg_id)
+        for attr in ("message_id", "msg_id", "msgid"):
+            val = getattr(interaction, attr, None)
+            if val:
+                return str(val)
+        msg = getattr(interaction, "message", None)
+        if msg:
+            msg_id = getattr(msg, "id", None) or getattr(msg, "message_id", None)
+            if msg_id:
+                return str(msg_id)
+        return None
+
     async def _register_file_token(
         self, file_path: str, *, timeout_sec: float = 600
     ) -> str | None:
@@ -540,10 +556,11 @@ class QQOfficialWebhookPager:
             image_height=image_height,
         )
 
-        msg_id = reply_to_msg_id
+        msg_id = self._resolve_interaction_msg_id(interaction, reply_to_msg_id)
 
         # Do not send proactive messages for paging interactions.
         if not msg_id:
+            logger.warning("QQ markdown+keyboard interaction requires reply msg id")
             return False
 
         payload: dict = {
@@ -754,11 +771,6 @@ class QQOfficialWebhookPager:
                 except Exception as exc:
                     logger.warning(f"QQ interaction prev handler failed: {exc!s}")
 
-            try:
-                await interaction_handler(bot, interaction)
-            except Exception as exc:
-                logger.warning(f"QQ interaction handler failed: {exc!s}")
-
         try:
             # botpy dispatch uses getattr(self, 'on_' + event_name)
             # and schedules it as a coroutine. Setting an attribute is enough.
@@ -925,10 +937,11 @@ class QQOfficialWebhookPager:
             image_height=1,
         )
 
-        msg_id = reply_to_msg_id
+        msg_id = self._resolve_interaction_msg_id(interaction, reply_to_msg_id)
 
         # Do not send proactive messages for paging interactions.
         if not msg_id:
+            logger.warning("QQ pager keyboard interaction requires reply msg id")
             return
 
         payload: dict = {
@@ -1091,7 +1104,7 @@ class QQOfficialWebhookPager:
     ) -> None:
         if not self._enable_markdown_reply:
             return
-        if not self._keyboard_template_id:
+        if not self._markdown_template_id:
             return
         await self._send_markdown_notice_for_interaction(
             bot,
@@ -1153,10 +1166,11 @@ class QQOfficialWebhookPager:
             image_height=1,
         )
 
-        msg_id = reply_to_msg_id
+        msg_id = self._resolve_interaction_msg_id(interaction, reply_to_msg_id)
 
         # Do not send proactive messages for paging interactions.
         if not msg_id:
+            logger.warning("QQ markdown notice interaction requires reply msg id")
             return
 
         payload: dict = {

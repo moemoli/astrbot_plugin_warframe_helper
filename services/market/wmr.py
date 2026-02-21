@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
 from ...clients.market_client import WarframeMarketClient
@@ -123,8 +124,8 @@ async def cmd_wmr(
 ):
     try:
         event.should_call_llm(False)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"Failed to disable LLM for /wmr: {exc!s}")
 
     arg_text = str(raw_args or "").strip()
     if not arg_text:
@@ -359,8 +360,11 @@ async def cmd_wmr(
         polarity=polarity,
         buyout_policy="direct",
     )
+    if auctions is None:
+        yield event.plain_result("未获取到紫卡拍卖数据（接口请求失败或不可达）。")
+        return
     if not auctions:
-        yield event.plain_result("未获取到紫卡拍卖数据（可能是网络限制或接口不可达）。")
+        yield event.plain_result("没有符合条件的一口价紫卡拍卖。")
         return
 
     ranked = rank_wmr_auctions(

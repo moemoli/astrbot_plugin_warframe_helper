@@ -143,13 +143,9 @@ async def handle_qq_interaction_create(
                 reply_to_msg_id=reply_to_msg_id,
             )
             return
-        page -= 1
+        new_page = page - 1
     else:
-        page += 1
-
-    state["page"] = page
-    state["limit"] = limit
-    pager_cache.put_by_origin_sender(origin=origin, sender_id=sender_id, state=state)
+        new_page = page + 1
 
     if kind == "wm":
         item = state.get("item")
@@ -167,12 +163,21 @@ async def handle_qq_interaction_create(
             return
 
         orders = await market_client.fetch_orders_by_item_id(item.item_id)
+        if orders is None:
+            await qq_pager.send_markdown_notice_interaction(
+                bot,
+                interaction,
+                title="翻页",
+                content="未获取到订单（接口请求失败或不可达）。",
+                reply_to_msg_id=reply_to_msg_id,
+            )
+            return
         if not orders:
             await qq_pager.send_markdown_notice_interaction(
                 bot,
                 interaction,
                 title="翻页",
-                content="未获取到订单（可能是网络限制或接口不可达）。",
+                content="暂无订单。",
                 reply_to_msg_id=reply_to_msg_id,
             )
             return
@@ -189,7 +194,7 @@ async def handle_qq_interaction_create(
             platform=platform_norm,
             order_type=order_type,
             language=language,
-            page=page,
+            page=new_page,
             limit=limit,
         )
 
@@ -213,14 +218,20 @@ async def handle_qq_interaction_create(
             )
             return
 
-        await qq_pager.send_result_markdown_with_keyboard_interaction(
+        ok = await qq_pager.send_result_markdown_with_keyboard_interaction(
             bot,
             interaction,
             kind="/wm",
-            page=page,
+            page=new_page,
             image_path=rendered.path,
             reply_to_msg_id=reply_to_msg_id,
         )
+        if ok:
+            state["page"] = new_page
+            state["limit"] = limit
+            pager_cache.put_by_origin_sender(
+                origin=origin, sender_id=sender_id, state=state
+            )
         # For interaction callbacks, do not fallback to image sending.
         # A successful callback implies markdown+keyboard has worked before.
         return
@@ -271,12 +282,21 @@ async def handle_qq_interaction_create(
             polarity=polarity,
             buyout_policy="direct",
         )
+        if auctions is None:
+            await qq_pager.send_markdown_notice_interaction(
+                bot,
+                interaction,
+                title="翻页",
+                content="未获取到紫卡拍卖数据（接口请求失败或不可达）。",
+                reply_to_msg_id=reply_to_msg_id,
+            )
+            return
         if not auctions:
             await qq_pager.send_markdown_notice_interaction(
                 bot,
                 interaction,
                 title="翻页",
-                content="未获取到紫卡拍卖数据（可能是网络限制或接口不可达）。",
+                content="没有符合条件的一口价紫卡拍卖。",
                 reply_to_msg_id=reply_to_msg_id,
             )
             return
@@ -302,7 +322,7 @@ async def handle_qq_interaction_create(
             negative_required=negative_required,
             mastery_rank_min=cast(int | None, mastery_rank_min),
             polarity=polarity,
-            page=page,
+            page=new_page,
             limit=limit,
         )
 
@@ -326,14 +346,20 @@ async def handle_qq_interaction_create(
             )
             return
 
-        await qq_pager.send_result_markdown_with_keyboard_interaction(
+        ok = await qq_pager.send_result_markdown_with_keyboard_interaction(
             bot,
             interaction,
             kind="/wmr",
-            page=page,
+            page=new_page,
             image_path=rendered.path,
             reply_to_msg_id=reply_to_msg_id,
         )
+        if ok:
+            state["page"] = new_page
+            state["limit"] = limit
+            pager_cache.put_by_origin_sender(
+                origin=origin, sender_id=sender_id, state=state
+            )
         # For interaction callbacks, do not fallback to image sending.
         return
 

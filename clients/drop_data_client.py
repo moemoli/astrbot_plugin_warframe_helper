@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
-from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+from astrbot.api.star import StarTools
 
 from ..http_utils import fetch_json
 
@@ -47,17 +47,19 @@ class DropDataClient:
         *,
         cache_ttl_sec: float = 24 * 60 * 60,
         http_timeout_sec: float = 30.0,
+        relic_detail_cache_max: int = 256,
     ) -> None:
         self._cache_ttl_sec = float(cache_ttl_sec)
         self._http_timeout_sec = float(http_timeout_sec)
+        self._relic_detail_cache_max = max(10, int(relic_detail_cache_max))
 
         self._mem_all_slim: DropDataCache | None = None
         self._mem_relics_index: DropDataCache | None = None
         self._mem_relic_detail: dict[str, DropDataCache] = {}
 
     def _base_dir(self) -> Path:
-        base = Path(get_astrbot_plugin_data_path())
-        return base / "astrbot_plugin_warframe_helper" / "drop_data"
+        base = StarTools.get_data_dir("warframe_helper")
+        return base / "drop_data"
 
     def _cache_path(self, name: str) -> Path:
         safe = re.sub(r"[^A-Za-z0-9._\-]+", "_", (name or "").strip())
@@ -79,8 +81,8 @@ class DropDataClient:
                     and "data" in payload
                 ):
                     return payload.get("data")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"drop-data cache read failed: {exc!s}")
 
         data = await fetch_json(urls, timeout_sec=self._http_timeout_sec)
         if data is None:
@@ -174,6 +176,8 @@ class DropDataClient:
         if mem and self._is_fresh(mem.fetched_at) and isinstance(mem.data, dict):
             return mem.data
 
+        self._evict_relic_detail()
+
         data = await self._get_cached_json(
             cache_key=cache_key,
             urls=self._urls(f"relics/{tier_s}/{name}.json"),
@@ -184,7 +188,27 @@ class DropDataClient:
         self._mem_relic_detail[cache_key] = DropDataCache(
             fetched_at=time.time(), data=data
         )
+        self._evict_relic_detail()
         return data
+
+    def _evict_relic_detail(self) -> None:
+        now = time.time()
+        expired = [
+            k
+            for k, v in self._mem_relic_detail.items()
+            if (now - float(v.fetched_at)) > self._cache_ttl_sec
+        ]
+        for k in expired:
+            self._mem_relic_detail.pop(k, None)
+
+        over = len(self._mem_relic_detail) - int(self._relic_detail_cache_max)
+        if over <= 0:
+            return
+        items = sorted(
+            self._mem_relic_detail.items(), key=lambda kv: float(kv[1].fetched_at)
+        )
+        for k, _ in items[:over]:
+            self._mem_relic_detail.pop(k, None)
 
     async def search_drops(self, *, item_query: str, limit: int = 15) -> list[dict]:
         qn = _normalize_query(item_query)

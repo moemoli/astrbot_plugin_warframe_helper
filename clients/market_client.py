@@ -28,14 +28,40 @@ class MarketOrder:
 
 class WarframeMarketClient:
     def __init__(
-        self, *, http_timeout_sec: float = 10.0, cache_ttl_sec: float = 30.0
+        self,
+        *,
+        http_timeout_sec: float = 10.0,
+        cache_ttl_sec: float = 30.0,
+        orders_cache_max: int = 256,
+        riven_cache_max: int = 128,
     ) -> None:
         self._timeout = aiohttp.ClientTimeout(total=http_timeout_sec)
         self._cache_ttl_sec = cache_ttl_sec
         self._orders_cache: dict[str, tuple[float, list[MarketOrder]]] = {}
         self._riven_cache: dict[str, tuple[float, list[RivenAuction]]] = {}
+        self._orders_cache_max = max(20, int(orders_cache_max))
+        self._riven_cache_max = max(20, int(riven_cache_max))
 
-    async def fetch_orders_by_item_id(self, item_id: str) -> list[MarketOrder]:
+    def _evict_cache(
+        self, cache: dict[str, tuple[float, list]], *, max_entries: int
+    ) -> None:
+        now = time.time()
+        expired = [
+            k for k, (ts, _) in cache.items() if (now - float(ts)) > self._cache_ttl_sec
+        ]
+        for k in expired:
+            cache.pop(k, None)
+
+        over = len(cache) - max_entries
+        if over <= 0:
+            return
+        items = sorted(cache.items(), key=lambda kv: float(kv[1][0]))
+        for k, _ in items[:over]:
+            cache.pop(k, None)
+
+    async def fetch_orders_by_item_id(
+        self, item_id: str
+    ) -> list[MarketOrder] | None:
         """从 warframe.market v2 拉取某个 item_id 的全部订单（包含所有平台）。"""
 
         if not item_id:
@@ -59,15 +85,19 @@ class WarframeMarketClient:
                 req_kw = request_kwargs_for_url(url)
                 async with s.get(url, headers=headers, **req_kw) as resp:
                     if resp.status != 200:
-                        return []
+                        logger.warning(
+                            "warframe.market orders request failed: HTTP %s",
+                            resp.status,
+                        )
+                        return None
                     payload = await resp.json()
         except Exception as exc:
             logger.warning(f"warframe.market orders request failed: {exc!s}")
-            return []
+            return None
 
         data = payload.get("data")
         if not isinstance(data, list):
-            return []
+            return None
 
         orders: list[MarketOrder] = []
         for row in data:
@@ -123,6 +153,7 @@ class WarframeMarketClient:
             )
 
         self._orders_cache[item_id] = (now, orders)
+        self._evict_cache(self._orders_cache, max_entries=self._orders_cache_max)
         return orders
 
     async def fetch_riven_auctions(
@@ -135,7 +166,7 @@ class WarframeMarketClient:
         mastery_rank_min: int | None = None,
         polarity: str | None = None,
         buyout_policy: str = "direct",
-    ) -> list[RivenAuction]:
+    ) -> list[RivenAuction] | None:
         """从 warframe.market v1 拉取紫卡拍卖列表。"""
 
         if not weapon_url_name:
@@ -209,18 +240,22 @@ class WarframeMarketClient:
                 req_kw = request_kwargs_for_url(url)
                 async with s.get(url, headers=headers, **req_kw) as resp:
                     if resp.status != 200:
-                        return []
+                        logger.warning(
+                            "warframe.market riven auctions request failed: HTTP %s",
+                            resp.status,
+                        )
+                        return None
                     payload = await resp.json()
         except Exception as exc:
             logger.warning(f"warframe.market riven auctions request failed: {exc!s}")
-            return []
+            return None
 
         pl = payload.get("payload")
         if not isinstance(pl, dict):
-            return []
+            return None
         auctions = pl.get("auctions")
         if not isinstance(auctions, list):
-            return []
+            return None
 
         out: list[RivenAuction] = []
         for row in auctions:
@@ -341,6 +376,7 @@ class WarframeMarketClient:
             )
 
         self._riven_cache[cache_key] = (now, out)
+        self._evict_cache(self._riven_cache, max_entries=self._riven_cache_max)
         return out
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
 from ...clients.market_client import WarframeMarketClient
@@ -38,8 +39,8 @@ async def cmd_wfp(
 ):
     try:
         event.should_call_llm(False)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"Failed to disable LLM for /wfp: {exc!s}")
 
     direction = parse_direction(str(raw_args))
 
@@ -73,13 +74,9 @@ async def cmd_wfp(
                 return
             yield event.plain_result("已经是第一页。")
             return
-        page -= 1
+        new_page = page - 1
     else:
-        page += 1
-
-    state["page"] = page
-    state["limit"] = limit
-    pager_cache.put(event=event, state=state)
+        new_page = page + 1
 
     if kind == "wm":
         item = state.get("item")
@@ -91,8 +88,11 @@ async def cmd_wfp(
             return
 
         orders = await market_client.fetch_orders_by_item_id(item.item_id)
+        if orders is None:
+            yield event.plain_result("未获取到订单（接口请求失败或不可达）。")
+            return
         if not orders:
-            yield event.plain_result("未获取到订单（可能是网络限制或接口不可达）。")
+            yield event.plain_result("暂无订单。")
             return
 
         filtered = filter_sort_wm_orders(
@@ -107,7 +107,7 @@ async def cmd_wfp(
             platform=platform_norm,
             order_type=order_type,
             language=language,
-            page=page,
+            page=new_page,
             limit=limit,
         )
 
@@ -122,6 +122,10 @@ async def cmd_wfp(
                 return
             yield event.plain_result("没有更多结果了。")
             return
+
+        state["page"] = new_page
+        state["limit"] = limit
+        pager_cache.put(event=event, state=state)
 
         wm_pick_cache.put(
             event=event,
@@ -141,7 +145,7 @@ async def cmd_wfp(
                 ok = await qq_pager.send_result_markdown_with_keyboard(
                     event,
                     kind="/wm",
-                    page=page,
+                    page=new_page,
                     image_path=rendered.path,
                     reply_to_msg_id=reply_msg_id,
                 )
@@ -152,7 +156,7 @@ async def cmd_wfp(
                 await qq_pager.send_pager_keyboard(
                     event,
                     kind="/wm",
-                    page=page,
+                    page=new_page,
                     reply_to_msg_id=reply_msg_id,
                 )
                 return
@@ -161,7 +165,7 @@ async def cmd_wfp(
 
         action_cn = "收购" if order_type == "buy" else "出售"
         lines = [
-            f"{item.get_localized_name(language)}（{platform_norm}）{action_cn} 第{page}页："
+            f"{item.get_localized_name(language)}（{platform_norm}）{action_cn} 第{new_page}页："
         ]
         for idx, o in enumerate(top, start=1):
             status = o.status or "unknown"
@@ -172,7 +176,7 @@ async def cmd_wfp(
             await qq_pager.send_pager_keyboard(
                 event,
                 kind="/wm",
-                page=page,
+                page=new_page,
                 reply_to_msg_id=reply_msg_id,
             )
         return
@@ -217,10 +221,11 @@ async def cmd_wfp(
             polarity=polarity,
             buyout_policy="direct",
         )
+        if auctions is None:
+            yield event.plain_result("未获取到紫卡拍卖数据（接口请求失败或不可达）。")
+            return
         if not auctions:
-            yield event.plain_result(
-                "未获取到紫卡拍卖数据（可能是网络限制或接口不可达）。"
-            )
+            yield event.plain_result("没有符合条件的一口价紫卡拍卖。")
             return
 
         ranked = rank_wmr_auctions(
@@ -244,7 +249,7 @@ async def cmd_wfp(
             negative_required=negative_required,
             mastery_rank_min=mastery_rank_min,
             polarity=polarity,
-            page=page,
+            page=new_page,
             limit=limit,
         )
 
@@ -260,12 +265,16 @@ async def cmd_wfp(
             yield event.plain_result("没有更多结果了。")
             return
 
+        state["page"] = new_page
+        state["limit"] = limit
+        pager_cache.put(event=event, state=state)
+
         if rendered:
             if qq_pager.enabled_for(event):
                 ok = await qq_pager.send_result_markdown_with_keyboard(
                     event,
                     kind="/wmr",
-                    page=page,
+                    page=new_page,
                     image_path=rendered.path,
                     reply_to_msg_id=reply_msg_id,
                 )
@@ -276,7 +285,7 @@ async def cmd_wfp(
                 await qq_pager.send_pager_keyboard(
                     event,
                     kind="/wmr",
-                    page=page,
+                    page=new_page,
                     reply_to_msg_id=reply_msg_id,
                 )
                 return
@@ -288,7 +297,7 @@ async def cmd_wfp(
             if language.startswith("en")
             else (weapon_query or weapon.item_name)
         )
-        lines = [f"紫卡 {fallback_name}（{platform_norm}）{summary} 第{page}页："]
+        lines = [f"紫卡 {fallback_name}（{platform_norm}）{summary} 第{new_page}页："]
         for idx, a in enumerate(top, start=1):
             name = a.owner_name or "unknown"
             status = a.owner_status or "unknown"

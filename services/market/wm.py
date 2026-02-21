@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
 from ...clients.market_client import WarframeMarketClient
@@ -27,8 +28,8 @@ async def cmd_wm(
 ):
     try:
         event.should_call_llm(False)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"Failed to disable LLM for /wm: {exc!s}")
 
     arg_text = str(raw_args or "").strip()
     if not arg_text:
@@ -91,8 +92,11 @@ async def cmd_wm(
         return
 
     orders = await market_client.fetch_orders_by_item_id(item.item_id)
+    if orders is None:
+        yield event.plain_result("未获取到订单（接口请求失败或不可达）。")
+        return
     if not orders:
-        yield event.plain_result("未获取到订单（可能是网络限制或接口不可达）。")
+        yield event.plain_result(f"{item.name}（{platform_norm}）暂无订单。")
         return
 
     filtered = filter_sort_wm_orders(
