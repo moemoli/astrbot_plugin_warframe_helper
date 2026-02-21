@@ -110,32 +110,41 @@ class QQOfficialWebhookPager:
 
         page_norm = max(1, int(page))
 
-        markdown: dict
-        if self._markdown_template_id:
+        markdown_text = f"翻页：{kind} 第{page_norm}页\n\n使用下方按钮上一页/下一页"
+
+        def build_template_markdown() -> dict:
             # Template variables are defined in the QQ bot console.
-            # Keep params <= 9.
-            markdown = {
+            # If the user's template uses different keys, QQ will reject the payload.
+            # We'll fallback to plain markdown content in that case.
+            return {
                 "custom_template_id": self._markdown_template_id,
                 "params": [
                     {"key": "title", "values": ["Warframe 助手"]},
                     {"key": "kind", "values": [str(kind)]},
                     {"key": "page", "values": [str(page_norm)]},
-                    {
-                        "key": "hint",
-                        "values": ["使用下方按钮：上一页 / 下一页"],
-                    },
+                    {"key": "hint", "values": ["使用下方按钮：上一页 / 下一页"]},
                 ],
             }
-        else:
-            markdown_text = f"翻页：{kind} 第{page_norm}页\n\n使用下方按钮上一页/下一页"
-            markdown = {"content": markdown_text}
+
+        def build_plain_markdown() -> dict:
+            return {"content": markdown_text}
+
+        markdown: dict = (
+            build_template_markdown()
+            if self._markdown_template_id
+            else build_plain_markdown()
+        )
+
+        msg_id = getattr(event.message_obj, "message_id", None)
 
         payload: dict = {
             "msg_type": 2,
             "markdown": markdown,
             "keyboard": {"id": self._keyboard_template_id},
-            "msg_id": getattr(event.message_obj, "message_id", None),
         }
+
+        if msg_id:
+            payload["msg_id"] = msg_id
 
         payload["msg_seq"] = random.randint(1, 10000)
 
@@ -180,7 +189,24 @@ class QQOfficialWebhookPager:
                 return
 
             await bot.api._http.request(route, json=payload)
+            return
         except Exception as exc:
+            # If a custom markdown template is configured, the most common failure
+            # is "markdown parameter error" due to mismatched template keys.
+            if self._markdown_template_id:
+                try:
+                    payload_fallback = dict(payload)
+                    payload_fallback["markdown"] = build_plain_markdown()
+                    await bot.api._http.request(route, json=payload_fallback)
+                    return
+                except Exception as exc2:
+                    logger.warning(
+                        "QQ pager keyboard send failed: %s; fallback failed: %s",
+                        str(exc),
+                        str(exc2),
+                    )
+                    return
+
             logger.warning(f"QQ pager keyboard send failed: {exc!s}")
             return
 
@@ -199,9 +225,10 @@ class QQOfficialWebhookPager:
 
         page_norm = max(1, int(page))
 
-        markdown: dict
-        if self._markdown_template_id:
-            markdown = {
+        markdown_text = f"翻页：{kind} 第{page_norm}页\n\n使用下方按钮上一页/下一页"
+
+        def build_template_markdown() -> dict:
+            return {
                 "custom_template_id": self._markdown_template_id,
                 "params": [
                     {"key": "title", "values": ["Warframe 助手"]},
@@ -210,9 +237,15 @@ class QQOfficialWebhookPager:
                     {"key": "hint", "values": ["使用下方按钮：上一页 / 下一页"]},
                 ],
             }
-        else:
-            markdown_text = f"翻页：{kind} 第{page_norm}页\n\n使用下方按钮上一页/下一页"
-            markdown = {"content": markdown_text}
+
+        def build_plain_markdown() -> dict:
+            return {"content": markdown_text}
+
+        markdown: dict = (
+            build_template_markdown()
+            if self._markdown_template_id
+            else build_plain_markdown()
+        )
 
         resolved = getattr(getattr(interaction, "data", None), "resolved", None)
         msg_id = getattr(resolved, "message_id", None)
@@ -221,9 +254,11 @@ class QQOfficialWebhookPager:
             "msg_type": 2,
             "markdown": markdown,
             "keyboard": {"id": self._keyboard_template_id},
-            "msg_id": msg_id,
             "msg_seq": random.randint(1, 10000),
         }
+
+        if msg_id:
+            payload["msg_id"] = msg_id
 
         route = None
         group_openid = getattr(interaction, "group_openid", None)
@@ -252,7 +287,22 @@ class QQOfficialWebhookPager:
 
         try:
             await bot.api._http.request(route, json=payload)  # type: ignore[attr-defined]
+            return
         except Exception as exc:
+            if self._markdown_template_id:
+                try:
+                    payload_fallback = dict(payload)
+                    payload_fallback["markdown"] = build_plain_markdown()
+                    await bot.api._http.request(route, json=payload_fallback)  # type: ignore[attr-defined]
+                    return
+                except Exception as exc2:
+                    logger.warning(
+                        "QQ pager keyboard send failed (interaction): %s; fallback failed: %s",
+                        str(exc),
+                        str(exc2),
+                    )
+                    return
+
             logger.warning(f"QQ pager keyboard send failed (interaction): {exc!s}")
             return
 
@@ -286,9 +336,8 @@ class QQOfficialWebhookPager:
 
         source = getattr(event.message_obj, "raw_message", None)
 
-        markdown: dict
-        if self._markdown_template_id:
-            markdown = {
+        def build_template_markdown() -> dict:
+            return {
                 "custom_template_id": self._markdown_template_id,
                 "params": [
                     {"key": "title", "values": [str(title).strip() or "提示"]},
@@ -297,17 +346,28 @@ class QQOfficialWebhookPager:
                     {"key": "hint", "values": [str(content).strip() or ""]},
                 ],
             }
-        else:
-            markdown = {
+
+        def build_plain_markdown() -> dict:
+            return {
                 "content": f"# {str(title).strip() or '提示'}\n\n{str(content).strip()}"
             }
+
+        markdown: dict = (
+            build_template_markdown()
+            if self._markdown_template_id
+            else build_plain_markdown()
+        )
+
+        msg_id = getattr(event.message_obj, "message_id", None)
 
         payload: dict = {
             "msg_type": 2,
             "markdown": markdown,
-            "msg_id": getattr(event.message_obj, "message_id", None),
             "msg_seq": random.randint(1, 10000),
         }
+
+        if msg_id:
+            payload["msg_id"] = msg_id
 
         try:
             if isinstance(source, GroupMessage):
@@ -350,7 +410,22 @@ class QQOfficialWebhookPager:
                 return
 
             await bot.api._http.request(route, json=payload)
+            return
         except Exception as exc:
+            if self._markdown_template_id:
+                try:
+                    payload_fallback = dict(payload)
+                    payload_fallback["markdown"] = build_plain_markdown()
+                    await bot.api._http.request(route, json=payload_fallback)
+                    return
+                except Exception as exc2:
+                    logger.warning(
+                        "QQ markdown notice send failed: %s; fallback failed: %s",
+                        str(exc),
+                        str(exc2),
+                    )
+                    return
+
             logger.warning(f"QQ markdown notice send failed: {exc!s}")
             return
 
@@ -405,9 +480,8 @@ class QQOfficialWebhookPager:
         except Exception:
             return
 
-        markdown: dict
-        if self._markdown_template_id:
-            markdown = {
+        def build_template_markdown() -> dict:
+            return {
                 "custom_template_id": self._markdown_template_id,
                 "params": [
                     {"key": "title", "values": [str(title).strip() or "提示"]},
@@ -416,10 +490,17 @@ class QQOfficialWebhookPager:
                     {"key": "hint", "values": [str(content).strip() or ""]},
                 ],
             }
-        else:
-            markdown = {
+
+        def build_plain_markdown() -> dict:
+            return {
                 "content": f"# {str(title).strip() or '提示'}\n\n{str(content).strip()}"
             }
+
+        markdown: dict = (
+            build_template_markdown()
+            if self._markdown_template_id
+            else build_plain_markdown()
+        )
 
         resolved = getattr(getattr(interaction, "data", None), "resolved", None)
         msg_id = getattr(resolved, "message_id", None)
@@ -427,9 +508,11 @@ class QQOfficialWebhookPager:
         payload: dict = {
             "msg_type": 2,
             "markdown": markdown,
-            "msg_id": msg_id,
             "msg_seq": random.randint(1, 10000),
         }
+
+        if msg_id:
+            payload["msg_id"] = msg_id
 
         route = None
         group_openid = getattr(interaction, "group_openid", None)
@@ -458,6 +541,21 @@ class QQOfficialWebhookPager:
 
         try:
             await bot.api._http.request(route, json=payload)  # type: ignore[attr-defined]
+            return
         except Exception as exc:
+            if self._markdown_template_id:
+                try:
+                    payload_fallback = dict(payload)
+                    payload_fallback["markdown"] = build_plain_markdown()
+                    await bot.api._http.request(route, json=payload_fallback)  # type: ignore[attr-defined]
+                    return
+                except Exception as exc2:
+                    logger.warning(
+                        "QQ markdown notice send failed (interaction): %s; fallback failed: %s",
+                        str(exc),
+                        str(exc2),
+                    )
+                    return
+
             logger.warning(f"QQ markdown notice send failed (interaction): {exc!s}")
             return

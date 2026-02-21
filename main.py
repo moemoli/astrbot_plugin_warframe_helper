@@ -66,9 +66,7 @@ class WarframeHelperPlugin(Star):
         keyboard_tpl = ""
         markdown_tpl = ""
         if isinstance(sub_config, dict):
-            enable_md = bool(
-                sub_config.get("webhook_enable_markdown_reply")
-            )
+            enable_md = bool(sub_config.get("webhook_enable_markdown_reply"))
             keyboard_tpl = str(
                 sub_config.get("webhook_pager_keyboard_template_id") or ""
             ).strip()
