@@ -45,3 +45,67 @@
 - `/wm ...`：物品订单
 - `/wmr ...`：紫卡（Riven）拍卖
 - `/wfp ...`：价格相关查询
+
+### QQ官方机器人 Markdown 以及按钮配置
+
+> 你需要预先申请 ```消息模板功能```
+
+- 按钮配置
+```json
+{
+  "rows": [
+    {
+      "buttons": [
+        {
+          "id": "prev",
+          "render_data": {
+            "label": "⬅️上一页",
+            "visited_label": "⬅️上一页",
+            "style": 1
+          },
+          "action": {
+            "type": 1,
+            "permission": {
+              "type": 2
+            },
+            "data": "wfp:prev",
+            "reply": false,
+            "enter": true,
+            "unsupport_tips": "你的客户端版本不支持消息按钮"
+          }
+        },
+        {
+          "id": "next",
+          "render_data": {
+            "label": "➡️下一页",
+            "visited_label": "➡️下一页",
+            "style": 1
+          },
+          "action": {
+            "type": 1,
+            "permission": {
+              "type": 2
+            },
+            "data": "wfp:next",
+            "reply": false,
+            "enter": true,
+            "unsupport_tips": "你的客户端版本不支持消息按钮"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+- Markdown配置
+
+```markdown
+# {{.title}}
+​
+![result #{{.image_w}}px #{{.image_h}}px]({{.image}})
+**指令**：{{.kind}}  
+{{.page}}
+{{.hint}}
+
+```
