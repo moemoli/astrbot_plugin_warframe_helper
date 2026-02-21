@@ -75,6 +75,7 @@ async def handle_qq_interaction_create(
     session_id = ""
     sender_id = ""
     message_type = MessageType.GROUP_MESSAGE
+    reply_to_msg_id: str | None = None
 
     try:
         group_openid = getattr(interaction, "group_openid", None)
@@ -114,8 +115,17 @@ async def handle_qq_interaction_create(
                 )
             except Exception:
                 pass
+            reply_to_msg_id = str(resolved_message_id)
     except Exception:
         return
+
+    if not reply_to_msg_id:
+        try:
+            cached = getattr(platform, "_session_last_message_id", None)
+            if isinstance(cached, dict):
+                reply_to_msg_id = cached.get(session_id)
+        except Exception:
+            reply_to_msg_id = None
 
     if not session_id or not sender_id:
         return
@@ -128,6 +138,7 @@ async def handle_qq_interaction_create(
             interaction,
             title="翻页",
             content="没有可翻页的记录，请先执行 /wm 或 /wmr。",
+            reply_to_msg_id=reply_to_msg_id,
         )
         return
 
@@ -142,6 +153,7 @@ async def handle_qq_interaction_create(
                 interaction,
                 title="翻页",
                 content="已经是第一页。",
+                reply_to_msg_id=reply_to_msg_id,
             )
             return
         page -= 1
@@ -172,6 +184,7 @@ async def handle_qq_interaction_create(
                 interaction,
                 title="翻页",
                 content="分页信息已过期，请重新执行 /wm。",
+                reply_to_msg_id=reply_to_msg_id,
             )
             return
 
@@ -182,6 +195,7 @@ async def handle_qq_interaction_create(
                 interaction,
                 title="翻页",
                 content="未获取到订单（可能是网络限制或接口不可达）。",
+                reply_to_msg_id=reply_to_msg_id,
             )
             return
 
@@ -207,6 +221,7 @@ async def handle_qq_interaction_create(
                 interaction,
                 title="翻页",
                 content="没有更多结果了。",
+                reply_to_msg_id=reply_to_msg_id,
             )
             return
 
@@ -216,6 +231,7 @@ async def handle_qq_interaction_create(
                 interaction,
                 title="翻页",
                 content="图片渲染失败，请稍后重试。",
+                reply_to_msg_id=reply_to_msg_id,
             )
             return
 
@@ -225,6 +241,7 @@ async def handle_qq_interaction_create(
             kind="/wm",
             page=page,
             image_path=rendered.path,
+            reply_to_msg_id=reply_to_msg_id,
         )
         if ok:
             return
@@ -243,6 +260,7 @@ async def handle_qq_interaction_create(
             interaction,
             kind="/wm",
             page=page,
+            reply_to_msg_id=reply_to_msg_id,
         )
         return
 
@@ -254,6 +272,7 @@ async def handle_qq_interaction_create(
                 interaction,
                 title="翻页",
                 content="分页信息已过期，请重新执行 /wmr。",
+                reply_to_msg_id=reply_to_msg_id,
             )
             return
 
@@ -297,6 +316,7 @@ async def handle_qq_interaction_create(
                 interaction,
                 title="翻页",
                 content="未获取到紫卡拍卖数据（可能是网络限制或接口不可达）。",
+                reply_to_msg_id=reply_to_msg_id,
             )
             return
 
@@ -331,6 +351,7 @@ async def handle_qq_interaction_create(
                 interaction,
                 title="翻页",
                 content="没有更多结果了。",
+                reply_to_msg_id=reply_to_msg_id,
             )
             return
 
@@ -340,6 +361,7 @@ async def handle_qq_interaction_create(
                 interaction,
                 title="翻页",
                 content="图片渲染失败，请稍后重试。",
+                reply_to_msg_id=reply_to_msg_id,
             )
             return
 
@@ -349,6 +371,7 @@ async def handle_qq_interaction_create(
             kind="/wmr",
             page=page,
             image_path=rendered.path,
+            reply_to_msg_id=reply_to_msg_id,
         )
         if ok:
             return
@@ -367,6 +390,7 @@ async def handle_qq_interaction_create(
             interaction,
             kind="/wmr",
             page=page,
+            reply_to_msg_id=reply_to_msg_id,
         )
         return
 
@@ -375,4 +399,5 @@ async def handle_qq_interaction_create(
         interaction,
         title="翻页",
         content="当前记录不支持翻页，请重新执行 /wm 或 /wmr。",
+        reply_to_msg_id=reply_to_msg_id,
     )

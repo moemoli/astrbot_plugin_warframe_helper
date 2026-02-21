@@ -78,6 +78,8 @@ class QQOfficialWebhookPager:
         if not image_url:
             return False
 
+        image_markdown = self._build_markdown_image(image_url, image_path=image_path)
+
         return await self._send_markdown_keyboard(
             event,
             title=title,
@@ -85,6 +87,7 @@ class QQOfficialWebhookPager:
             page=page,
             hint=hint,
             image_url=image_url,
+            image_markdown=image_markdown,
         )
 
     async def send_result_markdown_with_keyboard_interaction(
@@ -97,6 +100,7 @@ class QQOfficialWebhookPager:
         image_path: str,
         title: str = "Warframe 助手",
         hint: str = "使用下方按钮：上一页 / 下一页",
+        reply_to_msg_id: str | None = None,
     ) -> bool:
         if not self._enable_markdown_reply or not self._keyboard_template_id:
             return False
@@ -114,6 +118,8 @@ class QQOfficialWebhookPager:
         if not image_url:
             return False
 
+        image_markdown = self._build_markdown_image(image_url, image_path=image_path)
+
         return await self._send_markdown_keyboard_for_interaction(
             bot,
             interaction,
@@ -122,7 +128,38 @@ class QQOfficialWebhookPager:
             page=page,
             hint=hint,
             image_url=image_url,
+            image_markdown=image_markdown,
+            reply_to_msg_id=reply_to_msg_id,
         )
+
+    def _get_image_size(self, image_path: str) -> tuple[int, int] | None:
+        path = str(image_path or "").strip()
+        if not path:
+            return None
+        try:
+            from PIL import Image
+
+            with Image.open(path) as im:
+                width, height = im.size
+            if width > 0 and height > 0:
+                return int(width), int(height)
+        except Exception:
+            return None
+        return None
+
+    def _build_markdown_image(self, image_url: str, *, image_path: str) -> str:
+        url = str(image_url or "").strip()
+        if not url:
+            return ""
+
+        size = self._get_image_size(image_path)
+        if not size:
+            return f"![result]({url})"
+
+        width, height = size
+        # QQ Markdown supports setting image size via alt-text fragments.
+        # Use the original image dimensions to avoid aspect-ratio stretching.
+        return f"![result#{width}px #{height}px]({url})"
 
     async def _send_markdown_keyboard(
         self,
@@ -133,6 +170,7 @@ class QQOfficialWebhookPager:
         page: int,
         hint: str,
         image_url: str,
+        image_markdown: str,
     ) -> bool:
         """Low-level send: markdown + keyboard (event path)."""
 
@@ -165,9 +203,12 @@ class QQOfficialWebhookPager:
             }
 
         def build_plain_markdown() -> dict:
+            image_md = (
+                str(image_markdown or "").strip() or f"![result]({str(image_url)})"
+            )
             md = (
                 f"# {str(title).strip() or 'Warframe 助手'}\n\n"
-                f"![result#720px #1280px]({str(image_url)})\n\n"
+                f"{image_md}\n\n"
                 f"**指令**：{str(kind)}  \n**页数**：第{page_norm}页  \n\n{str(hint)}"
             )
             return {"content": md}
@@ -227,6 +268,7 @@ class QQOfficialWebhookPager:
                     page=page_norm,
                     hint=hint,
                     image_url=image_url,
+                    image_markdown=image_markdown,
                 )
             else:
                 return False
@@ -261,6 +303,8 @@ class QQOfficialWebhookPager:
         page: int,
         hint: str,
         image_url: str,
+        image_markdown: str,
+        reply_to_msg_id: str | None = None,
     ) -> bool:
         try:
             from botpy.http import Route
@@ -282,9 +326,12 @@ class QQOfficialWebhookPager:
             }
 
         def build_plain_markdown() -> dict:
+            image_md = (
+                str(image_markdown or "").strip() or f"![result]({str(image_url)})"
+            )
             md = (
                 f"# {str(title).strip() or 'Warframe 助手'}\n\n"
-                f"![result#720px #1280px]({str(image_url)})\n\n"
+                f"{image_md}\n\n"
                 f"**指令**：{str(kind)}  \n**页数**：第{page_norm}页  \n\n{str(hint)}"
             )
             return {"content": md}
@@ -296,7 +343,11 @@ class QQOfficialWebhookPager:
         )
 
         resolved = getattr(getattr(interaction, "data", None), "resolved", None)
-        msg_id = getattr(resolved, "message_id", None)
+        msg_id = reply_to_msg_id or getattr(resolved, "message_id", None)
+
+        # Do not send proactive messages for paging interactions.
+        if not msg_id:
+            return False
 
         payload: dict = {
             "content": " ",
@@ -304,9 +355,8 @@ class QQOfficialWebhookPager:
             "markdown": markdown,
             "keyboard": {"id": self._keyboard_template_id},
         }
-        if msg_id:
-            payload["msg_id"] = msg_id
-            payload["msg_seq"] = random.randint(1, 10000)
+        payload["msg_id"] = msg_id
+        payload["msg_seq"] = random.randint(1, 10000)
 
         route = None
         group_openid = getattr(interaction, "group_openid", None)
@@ -552,6 +602,7 @@ class QQOfficialWebhookPager:
         *,
         kind: str,
         page: int,
+        reply_to_msg_id: str | None = None,
     ) -> None:
         try:
             from botpy.http import Route
@@ -583,7 +634,11 @@ class QQOfficialWebhookPager:
         )
 
         resolved = getattr(getattr(interaction, "data", None), "resolved", None)
-        msg_id = getattr(resolved, "message_id", None)
+        msg_id = reply_to_msg_id or getattr(resolved, "message_id", None)
+
+        # Do not send proactive messages for paging interactions.
+        if not msg_id:
+            return
 
         payload: dict = {
             "content": " ",
@@ -592,10 +647,8 @@ class QQOfficialWebhookPager:
             "keyboard": {"id": self._keyboard_template_id},
         }
 
-        if msg_id:
-            payload["msg_id"] = msg_id
-
-            payload["msg_seq"] = random.randint(1, 10000)
+        payload["msg_id"] = msg_id
+        payload["msg_seq"] = random.randint(1, 10000)
 
         route = None
         group_openid = getattr(interaction, "group_openid", None)
@@ -775,6 +828,7 @@ class QQOfficialWebhookPager:
         *,
         title: str,
         content: str,
+        reply_to_msg_id: str | None = None,
     ) -> None:
         if not self._enable_markdown_reply:
             return
@@ -785,6 +839,7 @@ class QQOfficialWebhookPager:
             interaction,
             title=title,
             content=content,
+            reply_to_msg_id=reply_to_msg_id,
         )
 
     async def send_pager_keyboard_interaction(
@@ -794,6 +849,7 @@ class QQOfficialWebhookPager:
         *,
         kind: str,
         page: int,
+        reply_to_msg_id: str | None = None,
     ) -> None:
         if not self._enable_markdown_reply:
             return
@@ -804,6 +860,7 @@ class QQOfficialWebhookPager:
             interaction,
             kind=kind,
             page=page,
+            reply_to_msg_id=reply_to_msg_id,
         )
 
     async def _send_markdown_notice_for_interaction(
@@ -813,6 +870,7 @@ class QQOfficialWebhookPager:
         *,
         title: str,
         content: str,
+        reply_to_msg_id: str | None = None,
     ) -> None:
         try:
             from botpy.http import Route
@@ -842,7 +900,11 @@ class QQOfficialWebhookPager:
         )
 
         resolved = getattr(getattr(interaction, "data", None), "resolved", None)
-        msg_id = getattr(resolved, "message_id", None)
+        msg_id = reply_to_msg_id or getattr(resolved, "message_id", None)
+
+        # Do not send proactive messages for paging interactions.
+        if not msg_id:
+            return
 
         payload: dict = {
             "content": " ",
@@ -850,10 +912,8 @@ class QQOfficialWebhookPager:
             "markdown": markdown,
         }
 
-        if msg_id:
-            payload["msg_id"] = msg_id
-
-            payload["msg_seq"] = random.randint(1, 10000)
+        payload["msg_id"] = msg_id
+        payload["msg_seq"] = random.randint(1, 10000)
 
         route = None
         group_openid = getattr(interaction, "group_openid", None)
