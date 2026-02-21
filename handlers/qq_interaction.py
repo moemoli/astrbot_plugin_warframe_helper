@@ -219,6 +219,16 @@ async def handle_qq_interaction_create(
             )
             return
 
+        ok = await qq_pager.send_result_markdown_with_keyboard_interaction(
+            bot,
+            interaction,
+            kind="/wm",
+            page=page,
+            image_path=rendered.path,
+        )
+        if ok:
+            return
+
         try:
             await platform.send_by_session(
                 session,
@@ -331,6 +341,16 @@ async def handle_qq_interaction_create(
                 title="翻页",
                 content="图片渲染失败，请稍后重试。",
             )
+            return
+
+        ok = await qq_pager.send_result_markdown_with_keyboard_interaction(
+            bot,
+            interaction,
+            kind="/wmr",
+            page=page,
+            image_path=rendered.path,
+        )
+        if ok:
             return
 
         try:

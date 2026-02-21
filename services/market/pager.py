@@ -134,6 +134,15 @@ async def cmd_wfp(
 
         if rendered:
             if qq_pager.enabled_for(event):
+                ok = await qq_pager.send_result_markdown_with_keyboard(
+                    event,
+                    kind="/wm",
+                    page=page,
+                    image_path=rendered.path,
+                )
+                if ok:
+                    return
+
                 await event.send(event.image_result(rendered.path))
                 await qq_pager.send_pager_keyboard(event, kind="/wm", page=page)
                 return
@@ -237,6 +246,15 @@ async def cmd_wfp(
 
         if rendered:
             if qq_pager.enabled_for(event):
+                ok = await qq_pager.send_result_markdown_with_keyboard(
+                    event,
+                    kind="/wmr",
+                    page=page,
+                    image_path=rendered.path,
+                )
+                if ok:
+                    return
+
                 await event.send(event.image_result(rendered.path))
                 await qq_pager.send_pager_keyboard(event, kind="/wmr", page=page)
                 return

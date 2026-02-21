@@ -65,6 +65,7 @@ class WarframeHelperPlugin(Star):
         enable_md = False
         keyboard_tpl = ""
         markdown_tpl = ""
+        public_base_url = ""
         if isinstance(sub_config, dict):
             enable_md = bool(sub_config.get("webhook_enable_markdown_reply"))
             keyboard_tpl = str(
@@ -72,6 +73,9 @@ class WarframeHelperPlugin(Star):
             ).strip()
             markdown_tpl = str(
                 sub_config.get("webhook_markdown_template_id") or ""
+            ).strip()
+            public_base_url = str(
+                sub_config.get("webhook_public_base_url") or ""
             ).strip()
 
         # QQ official webhook keyboard template id (message buttons).
@@ -82,6 +86,7 @@ class WarframeHelperPlugin(Star):
             keyboard_template_id=qq_tpl,
             markdown_template_id=markdown_tpl,
             enable_markdown_reply=enable_md,
+            public_base_url=public_base_url,
         )
 
         self._qq_pager.set_interaction_handler(self._on_qq_interaction_create)
