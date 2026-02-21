@@ -123,7 +123,7 @@ async def cmd_wmr(
     qq_pager: QQOfficialWebhookPager,
 ):
     try:
-        event.should_call_llm(False)
+        event.should_call_llm(True)
     except Exception as exc:
         logger.debug(f"Failed to disable LLM for /wmr: {exc!s}")
 

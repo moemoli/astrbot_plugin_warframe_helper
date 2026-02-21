@@ -21,6 +21,7 @@ async def handle_qq_interaction_create(
     interaction: object,
     qq_pager: QQOfficialWebhookPager,
     pager_cache: EventScopedTTLCache,
+    wm_pick_cache: EventScopedTTLCache,
     market_client: WarframeMarketClient,
 ) -> None:
     if not qq_pager.enable_markdown_reply:
@@ -130,8 +131,15 @@ async def handle_qq_interaction_create(
         return
 
     kind = str(state.get("kind") or "").strip().lower()
-    page = int(state.get("page") or 1)
-    limit = max(1, min(int(state.get("limit") or 10), 20))
+
+    def _safe_int(value: object, default: int) -> int:
+        try:
+            return int(str(value))
+        except Exception:
+            return int(default)
+
+    page = max(1, _safe_int(state.get("page") or 1, 1))
+    limit = max(1, min(_safe_int(state.get("limit") or 10, 10), 20))
 
     if direction == "prev":
         if page <= 1:
@@ -217,6 +225,23 @@ async def handle_qq_interaction_create(
                 reply_to_msg_id=reply_to_msg_id,
             )
             return
+
+        wm_pick_cache.put_by_origin_sender(
+            origin=origin,
+            sender_id=sender_id,
+            state={
+                "item_name_en": getattr(item, "name", "") or "",
+                "order_type": order_type,
+                "platform": platform_norm,
+                "rows": [
+                    {
+                        "name": (o.ingame_name or "").strip(),
+                        "platinum": int(o.platinum),
+                    }
+                    for o in top
+                ],
+            },
+        )
 
         ok = await qq_pager.send_result_markdown_with_keyboard_interaction(
             bot,

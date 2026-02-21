@@ -31,13 +31,17 @@ class EventScopedTTLCache:
 
     def _cleanup(self) -> None:
         now = time.time()
-        expired = [
-            k
-            for k, v in self._data.items()
-            if not isinstance(v, dict)
-            or not isinstance(v.get("ts"), (int, float))
-            or (now - float(v.get("ts"))) > self._ttl_sec
-        ]
+        expired: list[str] = []
+        for k, v in self._data.items():
+            if not isinstance(v, dict):
+                expired.append(k)
+                continue
+            ts = v.get("ts")
+            if not isinstance(ts, (int, float)):
+                expired.append(k)
+                continue
+            if (now - float(ts)) > self._ttl_sec:
+                expired.append(k)
         for k in expired:
             self._data.pop(k, None)
 

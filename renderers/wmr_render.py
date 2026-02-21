@@ -606,8 +606,13 @@ _STAT_CN: dict[str, str] = {
 
 
 def _truncate_text(
-    draw: ImageDraw.ImageDraw, text: str, *, font: ImageFont.ImageFont, max_w: int
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    *,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    max_w: float | int,
 ) -> str:
+    max_w = int(max_w)
     s = str(text or "")
     if not s or max_w <= 0:
         return ""
@@ -657,7 +662,12 @@ def _fmt_attr_parts(a: RivenAttribute) -> tuple[str, str]:
     return label, val
 
 
-def _text_w(draw: ImageDraw.ImageDraw, text: str, *, font: ImageFont.ImageFont) -> int:
+def _text_w(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    *,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+) -> int:
     bbox = draw.textbbox((0, 0), text, font=font)
     return int(bbox[2] - bbox[0])
 
@@ -677,11 +687,12 @@ def _draw_attr_parts_line(
     x: int,
     y: int,
     attrs: list[tuple[str, str]],
-    max_w: int,
-    font: ImageFont.ImageFont,
+    max_w: float | int,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
     label_color: tuple[int, int, int, int],
     value_color: tuple[int, int, int, int],
 ) -> None:
+    max_w = int(max_w)
     if not attrs or max_w <= 0:
         return
 

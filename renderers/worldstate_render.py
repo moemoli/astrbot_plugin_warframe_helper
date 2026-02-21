@@ -86,8 +86,13 @@ def _linear_gradient(
 
 
 def _truncate(
-    draw: ImageDraw.ImageDraw, text: str, *, font: ImageFont.ImageFont, max_w: int
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    *,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    max_w: float | int,
 ) -> str:
+    max_w = int(max_w)
     s = (text or "").strip()
     if not s:
         return ""

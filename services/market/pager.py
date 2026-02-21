@@ -28,6 +28,13 @@ def parse_direction(text: str) -> str:
     return "next"
 
 
+def _safe_int(value: object, default: int) -> int:
+    try:
+        return int(str(value))
+    except Exception:
+        return int(default)
+
+
 async def cmd_wfp(
     *,
     event: AstrMessageEvent,
@@ -38,7 +45,7 @@ async def cmd_wfp(
     qq_pager: QQOfficialWebhookPager,
 ):
     try:
-        event.should_call_llm(False)
+        event.should_call_llm(True)
     except Exception as exc:
         logger.debug(f"Failed to disable LLM for /wfp: {exc!s}")
 
@@ -59,8 +66,8 @@ async def cmd_wfp(
     reply_msg_id = str(state.get("reply_msg_id") or "").strip() or None
 
     kind = str(state.get("kind") or "").strip().lower()
-    page = int(state.get("page") or 1)
-    limit = max(1, min(int(state.get("limit") or 10), 20))
+    page = max(1, _safe_int(state.get("page") or 1, 1))
+    limit = max(1, min(_safe_int(state.get("limit") or 10, 10), 20))
 
     if direction == "prev":
         if page <= 1:
@@ -312,7 +319,7 @@ async def cmd_wfp(
             await qq_pager.send_pager_keyboard(
                 event,
                 kind="/wmr",
-                page=page,
+                page=new_page,
                 reply_to_msg_id=reply_msg_id,
             )
         return

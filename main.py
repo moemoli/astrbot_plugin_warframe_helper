@@ -256,6 +256,7 @@ class WarframeHelperPlugin(Star):
             interaction=interaction,
             qq_pager=self._qq_pager,
             pager_cache=self._pager_cache,
+            wm_pick_cache=self._wm_pick_cache,
             market_client=self.market_client,
         )
         return
