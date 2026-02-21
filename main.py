@@ -482,6 +482,94 @@ class WarframeHelperPlugin(Star):
             return
         yield result
 
+    @filter.command("wf", alias={"wf帮助"})
+    async def wf_help(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
+        """Show plugin help.
+
+        Usage:
+        - /wf
+        - /wf help
+        - /wf 帮助
+        """
+
+        try:
+            event.should_call_llm(False)
+        except Exception:
+            pass
+
+        sub = str(args or "").strip().lower()
+        if not sub or sub in {"help", "h", "?", "帮助"}:
+            pass
+
+        rows = [
+            WorldstateRow(
+                title="市场查询",
+                subtitle="/wm /wmr /wfp（翻页 prev|next；QQ 按钮可用 wfp:prev / wfp:next）",
+            ),
+            WorldstateRow(
+                title="订阅",
+                subtitle="/订阅 /退订（别名：取消订阅）/订阅列表",
+            ),
+            WorldstateRow(
+                title="世界状态（任务）",
+                subtitle="/突击 /警报 /裂缝 /普通裂缝 /钢铁裂缝 /九重天裂缝",
+            ),
+            WorldstateRow(
+                title="世界状态（其它）",
+                subtitle="/奸商（别名：虚空商人、baro）/仲裁 /电波（别名：夜波、nightwave）",
+            ),
+            WorldstateRow(
+                title="世界状态（事件）",
+                subtitle="/入侵（别名：invasions）/集团（别名：syndicate）",
+            ),
+            WorldstateRow(
+                title="循环",
+                subtitle="/平原 /夜灵平原（别名：希图斯、cetus、poe）/魔胎之境 /地球昼夜",
+            ),
+            WorldstateRow(
+                title="循环（其它）",
+                subtitle="/奥布山谷（别名：金星平原、福尔图娜、vallis）/双衍王境 /轮回奖励",
+            ),
+            WorldstateRow(
+                title="奖励",
+                subtitle="/执行官猎杀（别名：archon、执行官）/钢铁奖励",
+            ),
+            WorldstateRow(
+                title="资料查询",
+                subtitle="/武器 /战甲 /MOD /掉落 /遗物",
+            ),
+            WorldstateRow(
+                title="工具",
+                subtitle="/wfmap（别名：wf映射）/wf（本帮助；别名：wf帮助）",
+            ),
+            WorldstateRow(
+                title="示例",
+                subtitle="/helloworld",
+            ),
+        ]
+
+        rendered = await render_worldstate_rows_image_to_file(
+            title="WF 帮助",
+            header_lines=["Warframe 助手 - 全部指令一览"],
+            rows=rows,
+            accent=(79, 70, 229, 255),
+        )
+        if rendered:
+            result = event.image_result(rendered.path)
+            if await self._try_send_qq_markdown_for_result(
+                event=event,
+                result=result,
+                title="WF 帮助",
+                kind="/wf",
+            ):
+                yield event.make_result().stop_event()
+                return
+            yield result
+            return
+
+        # Fallback: in case image rendering fails.
+        yield event.plain_result("/wf 帮助图片渲染失败，请稍后重试。")
+
     @filter.command("wm")
     async def wm(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
         """查询 warframe.market 订单。
