@@ -516,13 +516,11 @@ class WarframeHelperPlugin(Star):
     @filter.command("wf", alias={"wf帮助"})
     async def wf_help(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
         """Show plugin help.
-
         Usage:
         - /wf
         - /wf help
         - /wf 帮助
         """
-
         _safe_disable_llm(event, reason="/wf")
 
         sub = str(args).strip().lower()
