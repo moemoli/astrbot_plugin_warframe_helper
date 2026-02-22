@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import lzma
 import re
+import shutil
 import struct
 import time
 from dataclasses import dataclass
@@ -83,6 +84,8 @@ class PublicExportClient:
         self._mem_exports: dict[str, tuple[float, Any]] = {}
         self._mem_unique_name_maps: dict[str, dict[str, str]] = {}
         self._mem_unique_name_norm_maps: dict[str, dict[str, str]] = {}
+        self._mem_unique_name_maps_full: dict[str, dict[str, str]] = {}
+        self._mem_unique_name_norm_maps_full: dict[str, dict[str, str]] = {}
         self._mem_region_maps: dict[str, dict[str, str]] = {}
         self._mem_nightwave_map: dict[str, dict[str, tuple[str, int | None]]] = {}
         # localized slug -> [english names]
@@ -99,6 +102,46 @@ class PublicExportClient:
         for _ in range(over):
             cache.pop(next(iter(cache)), None)
 
+    def reset_cache(self, *, remove_disk: bool = True) -> dict[str, int | bool]:
+        mem_before = (
+            len(self._mem_index)
+            + len(self._mem_exports)
+            + len(self._mem_unique_name_maps)
+            + len(self._mem_unique_name_norm_maps)
+            + len(self._mem_unique_name_maps_full)
+            + len(self._mem_unique_name_norm_maps_full)
+            + len(self._mem_region_maps)
+            + len(self._mem_nightwave_map)
+            + len(self._mem_localized_to_en)
+            + len(self._mem_en_to_localized)
+        )
+
+        self._mem_index.clear()
+        self._mem_exports.clear()
+        self._mem_unique_name_maps.clear()
+        self._mem_unique_name_norm_maps.clear()
+        self._mem_unique_name_maps_full.clear()
+        self._mem_unique_name_norm_maps_full.clear()
+        self._mem_region_maps.clear()
+        self._mem_nightwave_map.clear()
+        self._mem_localized_to_en.clear()
+        self._mem_en_to_localized.clear()
+
+        disk_cleared = False
+        if remove_disk:
+            base = self._base_dir()
+            try:
+                if base.exists():
+                    shutil.rmtree(base)
+                    disk_cleared = True
+            except Exception as exc:
+                logger.warning(f"PublicExport cache dir remove failed: {exc!s}")
+
+        return {
+            "memory_entries": int(mem_before),
+            "disk_cleared": bool(disk_cleared),
+        }
+
     @staticmethod
     def _has_cjk(s: str) -> bool:
         return any("\u4e00" <= ch <= "\u9fff" for ch in (s or ""))
@@ -108,6 +151,36 @@ class PublicExportClient:
         raw = (s or "").strip().replace("\\", "/").lower()
         raw = re.sub(r"/+", "/", raw)
         return raw
+
+    @staticmethod
+    def _collect_unique_name_pairs(data: Any) -> dict[str, str]:
+        out: dict[str, str] = {}
+        if not isinstance(data, dict):
+            return out
+        for key, arr in data.items():
+            if not isinstance(key, str) or not key.startswith("Export"):
+                continue
+            if not isinstance(arr, list):
+                continue
+            for row in arr:
+                if not isinstance(row, dict):
+                    continue
+                uniq = row.get("uniqueName")
+                name = row.get("name")
+                if isinstance(uniq, str) and isinstance(name, str) and uniq and name:
+                    out.setdefault(uniq, name)
+        return out
+
+    def _build_unique_name_norm_map(self, mapping: dict[str, str]) -> dict[str, str]:
+        norm_map: dict[str, str] = {}
+        for k, v in mapping.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                continue
+            nk = self._normalize_unique_name_key(k)
+            if not nk or nk in norm_map:
+                continue
+            norm_map[nk] = v
+        return norm_map
 
     async def _get_english_to_localized_map(self, *, language: str) -> dict[str, str]:
         """Build a best-effort mapping: English display name -> localized display name.
@@ -385,28 +458,39 @@ class PublicExportClient:
         out: dict[str, str] = {}
         for fname in file_list:
             data = await self.fetch_export(fname, language=lang)
-            if not isinstance(data, dict):
-                continue
-            for key, arr in data.items():
-                if not key.startswith("Export"):
-                    continue
-                if not isinstance(arr, list):
-                    continue
-                for row in arr:
-                    if not isinstance(row, dict):
-                        continue
-                    uniq = row.get("uniqueName")
-                    name = row.get("name")
-                    if (
-                        isinstance(uniq, str)
-                        and isinstance(name, str)
-                        and uniq
-                        and name
-                    ):
-                        out.setdefault(uniq, name)
+            for uniq, name in self._collect_unique_name_pairs(data).items():
+                out.setdefault(uniq, name)
 
         self._mem_unique_name_maps[lang] = out
         self._evict_map_cache(self._mem_unique_name_maps)
+        return out
+
+    async def get_unique_name_map_full(self, *, language: str = "zh") -> dict[str, str]:
+        lang = (language or "zh").strip().lower() or "zh"
+        cached = self._mem_unique_name_maps_full.get(lang)
+        if cached is not None:
+            return cached
+
+        base = await self.get_unique_name_map(language=lang)
+        out: dict[str, str] = dict(base)
+
+        index = await self.get_index(language=lang)
+        if index is not None:
+            suffix = f"_{lang}.json"
+            all_export_files = [
+                name
+                for name in index.file_tokens.keys()
+                if isinstance(name, str)
+                and name.startswith("Export")
+                and name.endswith(suffix)
+            ]
+            for fname in all_export_files:
+                data = await self.fetch_export(fname, language=lang)
+                for uniq, name in self._collect_unique_name_pairs(data).items():
+                    out.setdefault(uniq, name)
+
+        self._mem_unique_name_maps_full[lang] = out
+        self._evict_map_cache(self._mem_unique_name_maps_full)
         return out
 
     async def translate_unique_name(
@@ -434,49 +518,56 @@ class PublicExportClient:
         if not norm:
             return None
 
+        def pick_from_norm_map(candidate_map: dict[str, str], key_norm: str) -> str | None:
+            hit_local = candidate_map.get(key_norm)
+            if hit_local:
+                return hit_local
+
+            parts_local = [p for p in key_norm.split("/") if p]
+            if not parts_local:
+                return None
+
+            tail_local = parts_local[-1]
+            if not tail_local:
+                return None
+
+            candidates_local: list[tuple[int, str]] = []
+            tail_suffix_local = f"/{tail_local}"
+            for k, v in candidate_map.items():
+                if k.endswith(tail_suffix_local):
+                    candidates_local.append((len(k), v))
+
+            if len(parts_local) >= 2:
+                tail2_suffix_local = f"/{parts_local[-2]}/{parts_local[-1]}"
+                for k, v in candidate_map.items():
+                    if k.endswith(tail2_suffix_local):
+                        candidates_local.append((len(k) - 1000, v))
+
+            if not candidates_local:
+                return None
+
+            candidates_local.sort(key=lambda x: x[0])
+            return candidates_local[0][1]
+
         norm_map = self._mem_unique_name_norm_maps.get(lang)
         if norm_map is None:
             mapping = await self.get_unique_name_map(language=lang)
-            norm_map = {}
-            for k, v in mapping.items():
-                if not isinstance(k, str) or not isinstance(v, str):
-                    continue
-                nk = self._normalize_unique_name_key(k)
-                if not nk or nk in norm_map:
-                    continue
-                norm_map[nk] = v
+            norm_map = self._build_unique_name_norm_map(mapping)
             self._mem_unique_name_norm_maps[lang] = norm_map
             self._evict_map_cache(self._mem_unique_name_norm_maps)
 
-        hit = norm_map.get(norm)
-        if hit:
-            return hit
+        picked = pick_from_norm_map(norm_map, norm)
+        if picked:
+            return picked
 
-        parts = [p for p in norm.split("/") if p]
-        if not parts:
-            return None
+        norm_map_full = self._mem_unique_name_norm_maps_full.get(lang)
+        if norm_map_full is None:
+            mapping_full = await self.get_unique_name_map_full(language=lang)
+            norm_map_full = self._build_unique_name_norm_map(mapping_full)
+            self._mem_unique_name_norm_maps_full[lang] = norm_map_full
+            self._evict_map_cache(self._mem_unique_name_norm_maps_full)
 
-        tail = parts[-1]
-        if not tail:
-            return None
-
-        candidates: list[tuple[int, str]] = []
-        tail_suffix = f"/{tail}"
-        for k, v in norm_map.items():
-            if k.endswith(tail_suffix):
-                candidates.append((len(k), v))
-
-        if len(parts) >= 2:
-            tail2_suffix = f"/{parts[-2]}/{parts[-1]}"
-            for k, v in norm_map.items():
-                if k.endswith(tail2_suffix):
-                    candidates.append((len(k) - 1000, v))
-
-        if not candidates:
-            return None
-
-        candidates.sort(key=lambda x: x[0])
-        return candidates[0][1]
+        return pick_from_norm_map(norm_map_full, norm)
 
     async def translate_region(
         self, node_unique: str, *, language: str = "zh"

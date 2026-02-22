@@ -396,6 +396,23 @@ class WarframeWorldstateClient:
     def _cache_put(self, key: str, payload: Any) -> None:
         self._cache[key] = (time.time(), payload)
 
+    def reset_public_export_cache(
+        self,
+        *,
+        clear_worldstate_cache: bool = True,
+        remove_disk: bool = True,
+    ) -> dict[str, int | bool]:
+        ws_before = len(self._cache)
+        if clear_worldstate_cache:
+            self._cache.clear()
+
+        pe_result = self._public_export.reset_cache(remove_disk=remove_disk)
+        return {
+            "worldstate_entries": int(ws_before),
+            "memory_entries": int(pe_result.get("memory_entries", 0)),
+            "disk_cleared": bool(pe_result.get("disk_cleared", False)),
+        }
+
     async def _get_worldstate(self, *, platform: Platform, language: str) -> Any | None:
         platform_norm: Platform = platform
         lang = (language or "zh").strip().lower() or "zh"

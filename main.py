@@ -436,47 +436,6 @@ class WarframeHelperPlugin(Star):
             return
         yield result
 
-    # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
-    @filter.command("helloworld")
-    async def helloworld(self, event: AstrMessageEvent):
-        """这是一个 hello world 指令"""  # 这是 handler 的描述，将会被解析方便用户了解插件内容。建议填写。
-        _safe_disable_llm(event, reason="/helloworld")
-        user_name = event.get_sender_name()
-        message_str = event.message_str  # 用户发的纯文本消息字符串
-        message_chain = (
-            event.get_messages()
-        )  # 用户所发的消息的消息链 # from astrbot.api.message_components import *
-        logger.info(message_chain)
-
-        rendered = await render_worldstate_rows_image_to_file(
-            title="Warframe Helper",
-            header_lines=[f"Hello, {user_name}"],
-            rows=[WorldstateRow(title=f"你发了：{message_str}")],
-            accent=(79, 70, 229, 255),
-        )
-        if rendered:
-            result = event.image_result(rendered.path)
-            if await self._try_send_qq_markdown_for_result(
-                event=event,
-                result=result,
-                title="Warframe Helper",
-                kind="/helloworld",
-            ):
-                yield event.make_result().stop_event()
-                return
-            yield result
-            return
-
-        text_result = event.plain_result(f"Hello, {user_name}, 你发了 {message_str}!")
-        if await self._try_send_qq_markdown_for_result(
-            event=event,
-            result=text_result,
-            title="Warframe Helper",
-            kind="/helloworld",
-        ):
-            yield event.make_result().stop_event()
-            return
-        yield text_result  # 发送一条纯文本消息
 
     @filter.command("wfmap", alias={"wf映射"})
     async def wfmap(self, event: AstrMessageEvent, query: str = ""):
@@ -566,6 +525,26 @@ class WarframeHelperPlugin(Star):
 
         _safe_disable_llm(event, reason="/wf")
 
+        sub = str(args).strip().lower()
+        if sub in {"reset", "刷新缓存", "重置缓存"}:
+            if not event.is_admin():
+                yield event.plain_result("/wf reset 仅限 AstrBot 管理员使用。")
+                return
+
+            reset_result = self.worldstate_client.reset_public_export_cache(
+                clear_worldstate_cache=True,
+                remove_disk=True,
+            )
+            ws_n = int(reset_result.get("worldstate_entries", 0))
+            mem_n = int(reset_result.get("memory_entries", 0))
+            disk_ok = bool(reset_result.get("disk_cleared", False))
+            disk_msg = "已清理" if disk_ok else "无需清理或清理失败"
+            yield event.plain_result(
+                "PublicExport 缓存已重置："
+                f"内存条目 {mem_n}，worldstate 缓存条目 {ws_n}，磁盘缓存 {disk_msg}。"
+            )
+            return
+
         rows = [
             WorldstateRow(
                 title="市场查询",
@@ -605,7 +584,9 @@ class WarframeHelperPlugin(Star):
             ),
             WorldstateRow(
                 title="工具",
-                subtitle="/wfmap（别名：wf映射）/wf（本帮助；别名：wf帮助）",
+                subtitle=(
+                    "/wfmap（别名：wf映射）/wf（本帮助；别名：wf帮助）"
+                ),
             ),
             WorldstateRow(
                 title="示例",
