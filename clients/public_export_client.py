@@ -82,6 +82,7 @@ class PublicExportClient:
         self._mem_index: dict[str, PublicExportIndex] = {}
         self._mem_exports: dict[str, tuple[float, Any]] = {}
         self._mem_unique_name_maps: dict[str, dict[str, str]] = {}
+        self._mem_unique_name_norm_maps: dict[str, dict[str, str]] = {}
         self._mem_region_maps: dict[str, dict[str, str]] = {}
         self._mem_nightwave_map: dict[str, dict[str, tuple[str, int | None]]] = {}
         # localized slug -> [english names]
@@ -101,6 +102,12 @@ class PublicExportClient:
     @staticmethod
     def _has_cjk(s: str) -> bool:
         return any("\u4e00" <= ch <= "\u9fff" for ch in (s or ""))
+
+    @staticmethod
+    def _normalize_unique_name_key(s: str) -> str:
+        raw = (s or "").strip().replace("\\", "/").lower()
+        raw = re.sub(r"/+", "/", raw)
+        return raw
 
     async def _get_english_to_localized_map(self, *, language: str) -> dict[str, str]:
         """Build a best-effort mapping: English display name -> localized display name.
@@ -410,6 +417,66 @@ class PublicExportClient:
             return None
         mapping = await self.get_unique_name_map(language=language)
         return mapping.get(unique_name)
+
+    async def translate_unique_name_loose(
+        self, unique_name: str, *, language: str = "zh"
+    ) -> str | None:
+        raw = (unique_name or "").strip()
+        if not raw:
+            return None
+
+        exact = await self.translate_unique_name(raw, language=language)
+        if exact:
+            return exact
+
+        lang = (language or "zh").strip().lower() or "zh"
+        norm = self._normalize_unique_name_key(raw)
+        if not norm:
+            return None
+
+        norm_map = self._mem_unique_name_norm_maps.get(lang)
+        if norm_map is None:
+            mapping = await self.get_unique_name_map(language=lang)
+            norm_map = {}
+            for k, v in mapping.items():
+                if not isinstance(k, str) or not isinstance(v, str):
+                    continue
+                nk = self._normalize_unique_name_key(k)
+                if not nk or nk in norm_map:
+                    continue
+                norm_map[nk] = v
+            self._mem_unique_name_norm_maps[lang] = norm_map
+            self._evict_map_cache(self._mem_unique_name_norm_maps)
+
+        hit = norm_map.get(norm)
+        if hit:
+            return hit
+
+        parts = [p for p in norm.split("/") if p]
+        if not parts:
+            return None
+
+        tail = parts[-1]
+        if not tail:
+            return None
+
+        candidates: list[tuple[int, str]] = []
+        tail_suffix = f"/{tail}"
+        for k, v in norm_map.items():
+            if k.endswith(tail_suffix):
+                candidates.append((len(k), v))
+
+        if len(parts) >= 2:
+            tail2_suffix = f"/{parts[-2]}/{parts[-1]}"
+            for k, v in norm_map.items():
+                if k.endswith(tail2_suffix):
+                    candidates.append((len(k) - 1000, v))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1]
 
     async def translate_region(
         self, node_unique: str, *, language: str = "zh"

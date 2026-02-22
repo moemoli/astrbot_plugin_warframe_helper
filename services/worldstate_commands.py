@@ -332,13 +332,23 @@ async def cmd_void_trader(
     rows: list[WorldstateRow] = []
     if info.inventory:
         for it in info.inventory[:30]:
+            item_name = (it.item or "").strip()
+            mapped_name = await worldstate_client.localize_item_display_name(
+                item_name,
+                language="zh",
+            )
+            title_name = mapped_name or item_name or "(未知物品)"
+
             price: list[str] = []
             if it.ducats is not None:
-                price.append(f"{it.ducats}D")
+                price.append(f"{it.ducats}杜卡德")
             if it.credits is not None:
-                price.append(f"{it.credits}CR")
+                price.append(f"{it.credits}现金")
             rows.append(
-                WorldstateRow(title=it.item, right=" / ".join(price) if price else None)
+                WorldstateRow(
+                    title=title_name,
+                    right=" / ".join(price) if price else None,
+                )
             )
     else:
         rows.append(WorldstateRow(title="(未返回商品清单)"))
@@ -366,13 +376,20 @@ async def cmd_void_trader(
         return event.plain_result("\n".join(lines))
 
     for it in info.inventory[:30]:
+        item_name = (it.item or "").strip()
+        mapped_name = await worldstate_client.localize_item_display_name(
+            item_name,
+            language="zh",
+        )
+        title_name = mapped_name or item_name or "(未知物品)"
+
         price: list[str] = []
         if it.ducats is not None:
-            price.append(f"{it.ducats}D")
+            price.append(f"{it.ducats}杜卡德")
         if it.credits is not None:
-            price.append(f"{it.credits}CR")
+            price.append(f"{it.credits}现金")
         p = " / ".join(price)
-        lines.append(f"- {it.item}{(' | ' + p) if p else ''}")
+        lines.append(f"- {title_name}{(' | ' + p) if p else ''}")
 
     return event.plain_result("\n".join(lines))
 

@@ -426,6 +426,19 @@ class WarframeWorldstateClient:
             unique_name, language=language
         )
 
+    async def localize_item_display_name(
+        self, name: str, *, language: str = "zh"
+    ) -> str | None:
+        raw = (name or "").strip()
+        if raw.startswith("/"):
+            mapped = await self._public_export.translate_unique_name_loose(
+                raw,
+                language=language,
+            )
+            if mapped:
+                return mapped
+        return await self._public_export.translate_display_name(name, language=language)
+
     def _mission_type_cn(self, code: str | None) -> str:
         code = (code or "").strip()
         mt = {
@@ -853,6 +866,11 @@ class WarframeWorldstateClient:
                     continue
                 item_name = (
                     await self._item_name(item_type, language=language)
+                ) or (
+                    await self._public_export.translate_unique_name_loose(
+                        item_type,
+                        language=language,
+                    )
                 ) or item_type
                 ducats = (
                     it.get("PrimePrice")
