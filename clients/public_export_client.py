@@ -648,6 +648,17 @@ class PublicExportClient:
         for lv in lang_variants:
             urls.extend(
                 [
+                    f"https://cdn.jsdelivr.net/npm/warframe-worldstate-data@latest/data/{lv}/solNodes.json",
+                ]
+            )
+        urls.extend(
+            [
+                "https://cdn.jsdelivr.net/npm/warframe-worldstate-data@latest/data/solNodes.json",
+            ]
+        )
+        for lv in lang_variants:
+            urls.extend(
+                [
                     f"https://raw.githubusercontent.com/WFCD/warframe-worldstate-data/master/data/{lv}/solNodes.json",
                     f"https://cdn.jsdelivr.net/gh/WFCD/warframe-worldstate-data@master/data/{lv}/solNodes.json",
                 ]
@@ -657,8 +668,15 @@ class PublicExportClient:
         out: dict[str, str] = {}
         if isinstance(data, dict):
             for k, v in data.items():
-                if isinstance(k, str) and isinstance(v, str) and k and v:
+                if not isinstance(k, str) or not k:
+                    continue
+                if isinstance(v, str) and v:
                     out[k] = v
+                    continue
+                if isinstance(v, dict):
+                    value = v.get("value")
+                    if isinstance(value, str) and value.strip():
+                        out[k] = value.strip()
 
         self._mem_solnodes_maps[lang] = out
         self._evict_map_cache(self._mem_solnodes_maps)
