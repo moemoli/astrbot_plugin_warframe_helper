@@ -11,6 +11,22 @@
         "description": "直连域名列表（绕过插件代理）",
         "hint": "当 proxy_url 非空时，匹配此列表的域名将不使用 proxy_url。支持通配符，例如：x.com、*.x.com。注意：*.x.com 仅匹配子域名，不匹配根域名 x.com。"
     },
+    "warframestat_api_bases": {
+        "type": "list",
+        "default": [
+            "https://api.warframestat.us"
+        ],
+        "description": "WarframeStat API 基础地址列表",
+        "hint": "用于仲裁/电波回退数据源。可填写你自建反向代理地址（如 https://stat.example.com）。插件会按顺序尝试：{base}/{platform}/{endpoint}。"
+    },
+    "warframestat_proxy_bases": {
+        "type": "list",
+        "default": [
+            "https://r.jina.ai/http://api.warframestat.us"
+        ],
+        "description": "WarframeStat 代理地址列表（可选）",
+        "hint": "当 API 基础地址不可达时使用的二级回退源。可留空，或填写你自己的代理地址。"
+    },
     "unknown_abbrev_provider_id": {
         "type": "string",
         "default": "",

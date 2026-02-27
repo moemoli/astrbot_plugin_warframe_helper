@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -8,7 +9,7 @@ from typing import Any, Literal
 
 from astrbot.api import logger
 
-from ..http_utils import fetch_json
+from ..http_utils import fetch_bytes, fetch_json
 from .public_export_client import PublicExportClient
 
 Platform = Literal["pc", "ps4", "xb1", "swi"]
@@ -22,11 +23,81 @@ OFFICIAL_WORLDSTATE_URLS: list[str] = [
 ]
 
 
+WARFRAMESTAT_API_BASES: list[str] = [
+    "https://api.warframestat.us",
+]
+
+
+WARFRAMESTAT_PROXY_BASES: list[str] = [
+    # r.jina.ai can proxy blocked upstreams in some networks (e.g. mainland CN).
+    "https://r.jina.ai/http://api.warframestat.us",
+]
+
+
 def _worldstate_urls(platform: Platform) -> list[str]:
     platform_norm = (platform or "pc").strip().lower()
     if platform_norm and platform_norm != "pc":
         return [f"{u}?platform={platform_norm}" for u in OFFICIAL_WORLDSTATE_URLS]
     return list(OFFICIAL_WORLDSTATE_URLS)
+
+
+def _normalize_base_urls(urls: list[str] | None) -> list[str]:
+    out: list[str] = []
+    for u in urls or []:
+        s = str(u or "").strip()
+        if not s:
+            continue
+        if s not in out:
+            out.append(s)
+    return out
+
+
+def _warframestat_urls(
+    platform: Platform,
+    endpoint: str,
+    *,
+    api_bases: list[str] | None = None,
+    proxy_bases: list[str] | None = None,
+) -> list[str]:
+    platform_norm = (platform or "pc").strip().lower() or "pc"
+    ep = (endpoint or "").strip(" /")
+    if not ep:
+        return []
+
+    urls: list[str] = []
+    api = _normalize_base_urls(api_bases) or list(WARFRAMESTAT_API_BASES)
+    proxies = _normalize_base_urls(proxy_bases) or list(WARFRAMESTAT_PROXY_BASES)
+    all_bases = [*api, *proxies]
+    for base in all_bases:
+        b = base.rstrip("/")
+        urls.append(f"{b}/{platform_norm}/{ep}")
+        urls.append(f"{b}/{platform_norm}/{ep}/")
+    return urls
+
+
+def _extract_json_from_text(text: str) -> Any | None:
+    raw = (text or "").strip()
+    if not raw:
+        return None
+
+    try:
+        import json
+
+        return json.loads(raw)
+    except Exception:
+        pass
+
+    m = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", raw)
+    if not m:
+        return None
+
+    candidate = m.group(1).strip()
+    try:
+        import json
+
+        return json.loads(candidate)
+    except Exception:
+        return None
 
 
 def _now_utc() -> datetime:
@@ -58,6 +129,24 @@ def _parse_ws_date(value: Any) -> datetime | None:
             return datetime.fromtimestamp(n / 1000.0, tz=timezone.utc)
         return datetime.fromtimestamp(n, tz=timezone.utc)
 
+    return None
+
+
+def _parse_any_datetime(value: Any) -> datetime | None:
+    dt = _parse_ws_date(value)
+    if dt is not None:
+        return dt
+
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            if raw.endswith("Z"):
+                return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return datetime.fromisoformat(raw)
+        except Exception:
+            return None
     return None
 
 
@@ -369,12 +458,23 @@ class DuviriCircuitRewardInfo:
 
 class WarframeWorldstateClient:
     def __init__(
-        self, *, http_timeout_sec: float = 10.0, cache_ttl_sec: float = 30.0
+        self,
+        *,
+        http_timeout_sec: float = 10.0,
+        cache_ttl_sec: float = 30.0,
+        warframestat_api_bases: list[str] | None = None,
+        warframestat_proxy_bases: list[str] | None = None,
     ) -> None:
         self._cache_ttl_sec = float(cache_ttl_sec)
         self._cache: dict[str, tuple[float, Any]] = {}
         self._http_timeout_sec = float(http_timeout_sec)
         self._public_export = PublicExportClient(http_timeout_sec=http_timeout_sec)
+        self._warframestat_api_bases = _normalize_base_urls(
+            warframestat_api_bases
+        ) or list(WARFRAMESTAT_API_BASES)
+        self._warframestat_proxy_bases = _normalize_base_urls(
+            warframestat_proxy_bases
+        ) or list(WARFRAMESTAT_PROXY_BASES)
 
         # Cycle epochs (seconds). Set via env vars if you need to calibrate.
         self._epoch_cetus = _env_epoch("ASTRBOT_WF_CETUS_EPOCH", 0)
@@ -383,6 +483,14 @@ class WarframeWorldstateClient:
         self._epoch_earth = _env_epoch("ASTRBOT_WF_EARTH_EPOCH", 0)
         self._epoch_duviri = _env_epoch("ASTRBOT_WF_DUVIRI_EPOCH", 0)
         self._warned_arbitration = False
+
+    def _warframestat_urls(self, platform: Platform, endpoint: str) -> list[str]:
+        return _warframestat_urls(
+            platform,
+            endpoint,
+            api_bases=self._warframestat_api_bases,
+            proxy_bases=self._warframestat_proxy_bases,
+        )
 
     def _cache_get(self, key: str) -> Any | None:
         rec = self._cache.get(key)
@@ -395,6 +503,17 @@ class WarframeWorldstateClient:
 
     def _cache_put(self, key: str, payload: Any) -> None:
         self._cache[key] = (time.time(), payload)
+
+    async def _fetch_json_resilient(self, urls: list[str]) -> Any | None:
+        data = await fetch_json(urls, timeout_sec=self._http_timeout_sec)
+        if data is not None:
+            return data
+
+        raw = await fetch_bytes(urls, timeout_sec=self._http_timeout_sec)
+        if raw is None:
+            return None
+        text = raw.decode("utf-8", "replace")
+        return _extract_json_from_text(text)
 
     def reset_public_export_cache(
         self,
@@ -490,6 +609,47 @@ class WarframeWorldstateClient:
         }
         return tier.get(modifier, modifier or "?")
 
+    async def _mission_type_name(self, code: str | None, *, language: str) -> str:
+        raw = (code or "").strip()
+        if not raw:
+            return "?"
+        dynamic = await self._public_export.get_mission_type_map(language=language)
+        hit = dynamic.get(raw)
+        if isinstance(hit, str) and hit.strip():
+            return hit.strip()
+        return self._mission_type_cn(raw)
+
+    async def _fissure_tier_name(self, modifier: str | None, *, language: str) -> str:
+        raw = (modifier or "").strip()
+        if not raw:
+            return "?"
+        dynamic = await self._public_export.get_fissure_tier_map(language=language)
+        hit = dynamic.get(raw)
+        if isinstance(hit, str) and hit.strip():
+            return hit.strip()
+        return self._fissure_tier_cn(raw)
+
+    def _faction_name_cn(self, code: str | None) -> str | None:
+        raw = (code or "").strip()
+        if not raw:
+            return None
+        mapping = {
+            "FC_GRINEER": "Grineer",
+            "FC_CORPUS": "Corpus",
+            "FC_INFESTATION": "Infested",
+            "FC_INFESTED": "Infested",
+            "FC_OROKIN": "Orokin",
+            "FC_CORRUPTED": "Corrupted",
+            "FC_MURMUR": "Murmur",
+            "FC_SENTIENT": "Sentient",
+            "FC_TENNO": "Tenno",
+        }
+        if raw in mapping:
+            return mapping[raw]
+        if raw.startswith("FC_"):
+            return raw.removeprefix("FC_").replace("_", " ").title()
+        return raw
+
     async def _format_counted_items(
         self, counted_items: Any, *, language: str
     ) -> list[str]:
@@ -534,7 +694,9 @@ class WarframeWorldstateClient:
 
             mt_raw = mi.get("missionType")
             mission_code = mt_raw if isinstance(mt_raw, str) else ""
-            mission_type = self._mission_type_cn(mission_code)
+            mission_type = await self._mission_type_name(
+                mission_code, language=language
+            )
             faction = mi.get("faction") if isinstance(mi.get("faction"), str) else None
 
             min_level = (
@@ -602,10 +764,12 @@ class WarframeWorldstateClient:
                 node = await self._node_name(node_u, language=language)
                 mc_raw = row.get("MissionType")
                 mission_code = mc_raw if isinstance(mc_raw, str) else ""
-                mission_type = self._mission_type_cn(mission_code)
+                mission_type = await self._mission_type_name(
+                    mission_code, language=language
+                )
                 mod_raw = row.get("Modifier")
                 modifier = mod_raw if isinstance(mod_raw, str) else ""
-                tier = self._fissure_tier_cn(modifier)
+                tier = await self._fissure_tier_name(modifier, language=language)
                 is_hard = bool(row.get("Hard"))
                 expiry = _parse_ws_date(row.get("Expiry"))
                 out.append(
@@ -627,11 +791,12 @@ class WarframeWorldstateClient:
                     continue
                 node_u = row.get("Node") if isinstance(row.get("Node"), str) else ""
                 node = await self._node_name(node_u, language=language)
-                tier = self._fissure_tier_cn(
+                tier_code = (
                     row.get("ActiveMissionTier")
                     if isinstance(row.get("ActiveMissionTier"), str)
                     else ""
                 )
+                tier = await self._fissure_tier_name(tier_code, language=language)
                 expiry = _parse_ws_date(row.get("Expiry"))
                 out.append(
                     FissureInfo(
@@ -673,11 +838,12 @@ class WarframeWorldstateClient:
                     continue
                 node_u = v.get("node") if isinstance(v.get("node"), str) else ""
                 node = await self._node_name(node_u, language=language)
-                mt = self._mission_type_cn(
+                mission_code = (
                     v.get("missionType")
                     if isinstance(v.get("missionType"), str)
                     else ""
                 )
+                mt = await self._mission_type_name(mission_code, language=language)
                 mod_raw = v.get("modifierType")
                 modifier = (
                     mod_raw.replace("SORTIE_MODIFIER_", "")
@@ -724,11 +890,12 @@ class WarframeWorldstateClient:
                     continue
                 node_u = m.get("node") if isinstance(m.get("node"), str) else ""
                 node = await self._node_name(node_u, language=language)
-                mt = self._mission_type_cn(
+                mission_code = (
                     m.get("missionType")
                     if isinstance(m.get("missionType"), str)
                     else ""
                 )
+                mt = await self._mission_type_name(mission_code, language=language)
                 mod_raw = m.get("modifierType")
                 modifier = (
                     mod_raw.replace("SORTIE_MODIFIER_", "")
@@ -808,27 +975,76 @@ class WarframeWorldstateClient:
             "CetusSyndicate": "希图斯",
             "SolarisSyndicate": "福尔图娜",
             "ZarimanSyndicate": "扎里曼",
+            "EntratiSyndicate": "英择谛",
+            "QuillsSyndicate": "夜羽",
+            "OstronsSyndicate": "奥斯顿",
+            "VoxSyndicate": "索拉里斯之声",
+            "VentkidsSyndicate": "通风小子",
+            "HoldfastSyndicate": "扎里曼坚守者",
+            "CaviaSyndicate": "卡维亚",
         }
+        dynamic_tag_name = await self._public_export.get_syndicate_tag_map(
+            language=language
+        )
 
         out: list[SyndicateInfo] = []
         for row in missions:
             if not isinstance(row, dict):
                 continue
-            tag = row.get("Tag") if isinstance(row.get("Tag"), str) else None
-            name = tag_name.get(tag or "", tag or "?")
-            expiry = _parse_ws_date(row.get("Expiry"))
+            tag = (
+                row.get("Tag")
+                if isinstance(row.get("Tag"), str)
+                else row.get("tag")
+                if isinstance(row.get("tag"), str)
+                else None
+            )
+            if isinstance(tag, str) and tag in dynamic_tag_name:
+                name = dynamic_tag_name[tag]
+            elif tag in tag_name:
+                name = tag_name[tag]
+            elif isinstance(tag, str) and tag:
+                name = tag.replace("Syndicate", "") or tag
+            else:
+                name = "?"
+
+            expiry = _parse_any_datetime(row.get("Expiry") or row.get("expiry"))
             eta = _format_eta_from_dt(expiry)
 
             jobs: list[SyndicateJob] = []
-            # Open-world syndicates have Jobs
             jobs_raw = row.get("Jobs")
+            if not isinstance(jobs_raw, list):
+                jobs_raw = row.get("jobs")
+            if not isinstance(jobs_raw, list):
+                jobs_raw = row.get("JobList")
             if isinstance(jobs_raw, list):
-                for _ in jobs_raw[:3]:
-                    jobs.append(SyndicateJob(node=name, mission_type="赏金", eta=eta))
-            # Regular syndicates have Nodes
+                for j in jobs_raw[:18]:
+                    if not isinstance(j, dict):
+                        continue
+                    min_lv = (
+                        j.get("minEnemyLevel")
+                        if isinstance(j.get("minEnemyLevel"), int)
+                        else None
+                    )
+                    max_lv = (
+                        j.get("maxEnemyLevel")
+                        if isinstance(j.get("maxEnemyLevel"), int)
+                        else None
+                    )
+                    if min_lv is not None and max_lv is not None:
+                        node = f"{min_lv}-{max_lv}级"
+                    elif min_lv is not None:
+                        node = f"{min_lv}级"
+                    elif max_lv is not None:
+                        node = f"{max_lv}级"
+                    else:
+                        node = name
+                    jobs.append(SyndicateJob(node=node, mission_type="赏金", eta=eta))
+
             nodes = row.get("Nodes")
+            if not isinstance(nodes, list):
+                nodes = row.get("nodes")
             if isinstance(nodes, list) and nodes:
-                for n in nodes[:3]:
+                for n in nodes[:18]:
                     if not isinstance(n, str):
                         continue
                     jobs.append(
@@ -882,13 +1098,15 @@ class WarframeWorldstateClient:
                 if not isinstance(item_type, str) or not item_type:
                     continue
                 item_name = (
-                    await self._item_name(item_type, language=language)
-                ) or (
-                    await self._public_export.translate_unique_name_loose(
-                        item_type,
-                        language=language,
+                    (await self._item_name(item_type, language=language))
+                    or (
+                        await self._public_export.translate_unique_name_loose(
+                            item_type,
+                            language=language,
+                        )
                     )
-                ) or item_type
+                    or item_type
+                )
                 ducats = (
                     it.get("PrimePrice")
                     if isinstance(it.get("PrimePrice"), int)
@@ -913,12 +1131,35 @@ class WarframeWorldstateClient:
     async def fetch_arbitration(
         self, *, platform: Platform = "pc", language: str = "zh"
     ) -> ArbitrationInfo | None:
-        if not self._warned_arbitration:
-            logger.info(
-                "Official worldState does not expose arbitration data currently; returning None"
-            )
-            self._warned_arbitration = True
-        return None
+        cache_key = f"warframestat:arbitration:{platform}:{language}"
+        cached = self._cache_get(cache_key)
+        if isinstance(cached, ArbitrationInfo):
+            return cached
+
+        data = await self._fetch_json_resilient(
+            self._warframestat_urls(platform, "arbitration")
+        )
+        if not isinstance(data, dict):
+            if not self._warned_arbitration:
+                logger.info("arbitration data unavailable from fallback source")
+                self._warned_arbitration = True
+            return None
+
+        node_raw = data.get("node") if isinstance(data.get("node"), str) else None
+        if not node_raw:
+            return None
+        mission_raw = data.get("type") if isinstance(data.get("type"), str) else None
+        enemy_raw = data.get("enemy") if isinstance(data.get("enemy"), str) else None
+        expiry = _parse_any_datetime(data.get("expiry") or data.get("endDate"))
+
+        info = ArbitrationInfo(
+            node=await self._node_name(node_raw, language=language),
+            mission_type=(mission_raw or "?").strip() or "?",
+            enemy=self._faction_name_cn(enemy_raw),
+            eta=_format_eta_from_dt(expiry),
+        )
+        self._cache_put(cache_key, info)
+        return info
 
     async def fetch_nightwave(
         self, *, platform: Platform = "pc", language: str = "zh"
@@ -939,6 +1180,8 @@ class WarframeWorldstateClient:
         )
         challenges: list[NightwaveChallenge] = []
         active_raw = si.get("ActiveChallenges")
+        if not isinstance(active_raw, list):
+            active_raw = si.get("activeChallenges")
         if isinstance(active_raw, list):
             for c in active_raw:
                 if not isinstance(c, dict):
@@ -947,10 +1190,32 @@ class WarframeWorldstateClient:
                     c.get("Challenge") if isinstance(c.get("Challenge"), str) else None
                 )
                 if not uniq:
+                    uniq = (
+                        c.get("challenge")
+                        if isinstance(c.get("challenge"), str)
+                        else None
+                    )
+                if not uniq:
                     continue
-                title, standing = mapping.get(uniq, (uniq.split("/")[-1], None))
+
+                title: str | None = None
+                standing: int | None = None
+                mapped = mapping.get(uniq)
+                if mapped:
+                    title, standing = mapped
+                else:
+                    loose = await self._public_export.translate_unique_name_loose(
+                        uniq, language=language
+                    )
+                    if isinstance(loose, str) and loose.strip():
+                        title = loose.strip()
+                if not title:
+                    title = uniq.split("/")[-1]
+
                 is_daily = bool(c.get("Daily"))
-                c_expiry = _parse_ws_date(c.get("Expiry")) or expiry
+                c_expiry = (
+                    _parse_any_datetime(c.get("Expiry") or c.get("expiry")) or expiry
+                )
                 challenges.append(
                     NightwaveChallenge(
                         title=title,
@@ -959,6 +1224,60 @@ class WarframeWorldstateClient:
                         eta=_format_eta_from_dt(c_expiry),
                     )
                 )
+
+        if not challenges:
+            fallback = await self._fetch_json_resilient(
+                self._warframestat_urls(platform, "nightwave")
+            )
+            if isinstance(fallback, dict):
+                fallback_season = (
+                    fallback.get("season")
+                    if isinstance(fallback.get("season"), int)
+                    else season
+                )
+                fallback_phase = (
+                    fallback.get("phase")
+                    if isinstance(fallback.get("phase"), int)
+                    else phase
+                )
+                fallback_expiry = (
+                    _parse_any_datetime(
+                        fallback.get("expiry") or fallback.get("endDate")
+                    )
+                    or expiry
+                )
+
+                fallback_rows = fallback.get("activeChallenges")
+                if isinstance(fallback_rows, list):
+                    for c in fallback_rows:
+                        if not isinstance(c, dict):
+                            continue
+                        title = (
+                            c.get("title") if isinstance(c.get("title"), str) else None
+                        )
+                        if not title:
+                            continue
+                        rep = (
+                            c.get("reputation")
+                            if isinstance(c.get("reputation"), int)
+                            else None
+                        )
+                        c_expiry = (
+                            _parse_any_datetime(c.get("expiry") or c.get("endDate"))
+                            or fallback_expiry
+                        )
+                        challenges.append(
+                            NightwaveChallenge(
+                                title=title,
+                                is_daily=bool(c.get("isDaily")),
+                                reputation=rep,
+                                eta=_format_eta_from_dt(c_expiry),
+                            )
+                        )
+
+                season = fallback_season
+                phase = fallback_phase
+                expiry = fallback_expiry
 
         return NightwaveInfo(
             season=season,
@@ -997,6 +1316,8 @@ class WarframeWorldstateClient:
                 if isinstance(row.get("DefenderFaction"), str)
                 else None
             )
+            attacker = self._faction_name_cn(attacker)
+            defender = self._faction_name_cn(defender)
 
             goal = row.get("Goal") if isinstance(row.get("Goal"), int) else None
             count = row.get("Count") if isinstance(row.get("Count"), int) else None

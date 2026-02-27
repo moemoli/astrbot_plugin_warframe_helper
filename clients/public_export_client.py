@@ -90,6 +90,10 @@ class PublicExportClient:
         self._mem_region_norm_maps: dict[str, dict[str, str]] = {}
         self._mem_solnodes_maps: dict[str, dict[str, str]] = {}
         self._mem_nightwave_map: dict[str, dict[str, tuple[str, int | None]]] = {}
+        self._mem_mission_type_map: dict[str, dict[str, str]] = {}
+        self._mem_fissure_tier_map: dict[str, dict[str, str]] = {}
+        self._mem_faction_map: dict[str, dict[str, str]] = {}
+        self._mem_syndicate_tag_map: dict[str, dict[str, str]] = {}
         # localized slug -> [english names]
         self._mem_localized_to_en: dict[str, dict[str, list[str]]] = {}
         # english slug -> localized name
@@ -116,6 +120,10 @@ class PublicExportClient:
             + len(self._mem_region_norm_maps)
             + len(self._mem_solnodes_maps)
             + len(self._mem_nightwave_map)
+            + len(self._mem_mission_type_map)
+            + len(self._mem_fissure_tier_map)
+            + len(self._mem_faction_map)
+            + len(self._mem_syndicate_tag_map)
             + len(self._mem_localized_to_en)
             + len(self._mem_en_to_localized)
         )
@@ -130,6 +138,10 @@ class PublicExportClient:
         self._mem_region_norm_maps.clear()
         self._mem_solnodes_maps.clear()
         self._mem_nightwave_map.clear()
+        self._mem_mission_type_map.clear()
+        self._mem_fissure_tier_map.clear()
+        self._mem_faction_map.clear()
+        self._mem_syndicate_tag_map.clear()
         self._mem_localized_to_en.clear()
         self._mem_en_to_localized.clear()
 
@@ -752,6 +764,110 @@ class PublicExportClient:
 
         self._mem_nightwave_map[lang] = out
         self._evict_map_cache(self._mem_nightwave_map)
+        return out
+
+    async def _fetch_wfcd_simple_map(
+        self,
+        *,
+        filename: str,
+        language: str,
+        value_keys: tuple[str, ...],
+    ) -> dict[str, str]:
+        lang = (language or "zh").strip().lower() or "zh"
+
+        lang_variants: list[str]
+        if lang.startswith("zh"):
+            lang_variants = ["zh", "zh-hans", "en"]
+        else:
+            lang_variants = [lang, "en"]
+
+        urls: list[str] = []
+        for lv in lang_variants:
+            urls.extend(
+                [
+                    f"https://cdn.jsdelivr.net/npm/warframe-worldstate-data@latest/data/{lv}/{filename}",
+                    f"https://cdn.jsdelivr.net/gh/WFCD/warframe-worldstate-data@master/data/{lv}/{filename}",
+                    f"https://raw.githubusercontent.com/WFCD/warframe-worldstate-data/master/data/{lv}/{filename}",
+                ]
+            )
+
+        data = await fetch_json(urls, timeout_sec=min(self._http_timeout_sec, 18.0))
+        out: dict[str, str] = {}
+        if not isinstance(data, dict):
+            return out
+
+        for key, value in data.items():
+            if not isinstance(key, str) or not key:
+                continue
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    out[key] = text
+                continue
+            if not isinstance(value, dict):
+                continue
+            for vk in value_keys:
+                v = value.get(vk)
+                if isinstance(v, str) and v.strip():
+                    out[key] = v.strip()
+                    break
+
+        return out
+
+    async def get_mission_type_map(self, *, language: str = "zh") -> dict[str, str]:
+        lang = (language or "zh").strip().lower() or "zh"
+        cached = self._mem_mission_type_map.get(lang)
+        if cached is not None:
+            return cached
+        out = await self._fetch_wfcd_simple_map(
+            filename="missionTypes.json",
+            language=lang,
+            value_keys=("value", "name"),
+        )
+        self._mem_mission_type_map[lang] = out
+        self._evict_map_cache(self._mem_mission_type_map)
+        return out
+
+    async def get_fissure_tier_map(self, *, language: str = "zh") -> dict[str, str]:
+        lang = (language or "zh").strip().lower() or "zh"
+        cached = self._mem_fissure_tier_map.get(lang)
+        if cached is not None:
+            return cached
+        out = await self._fetch_wfcd_simple_map(
+            filename="fissureModifiers.json",
+            language=lang,
+            value_keys=("value", "name"),
+        )
+        self._mem_fissure_tier_map[lang] = out
+        self._evict_map_cache(self._mem_fissure_tier_map)
+        return out
+
+    async def get_faction_map(self, *, language: str = "zh") -> dict[str, str]:
+        lang = (language or "zh").strip().lower() or "zh"
+        cached = self._mem_faction_map.get(lang)
+        if cached is not None:
+            return cached
+        out = await self._fetch_wfcd_simple_map(
+            filename="factionsData.json",
+            language=lang,
+            value_keys=("value", "name"),
+        )
+        self._mem_faction_map[lang] = out
+        self._evict_map_cache(self._mem_faction_map)
+        return out
+
+    async def get_syndicate_tag_map(self, *, language: str = "zh") -> dict[str, str]:
+        lang = (language or "zh").strip().lower() or "zh"
+        cached = self._mem_syndicate_tag_map.get(lang)
+        if cached is not None:
+            return cached
+        out = await self._fetch_wfcd_simple_map(
+            filename="syndicatesData.json",
+            language=lang,
+            value_keys=("name", "value"),
+        )
+        self._mem_syndicate_tag_map[lang] = out
+        self._evict_map_cache(self._mem_syndicate_tag_map)
         return out
 
     async def search_weapon(

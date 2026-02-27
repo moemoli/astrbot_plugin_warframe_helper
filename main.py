@@ -82,12 +82,8 @@ def _parse_qq_webhook_config(config: dict | None) -> QQWebhookConfig:
         keyboard_tpl = str(
             sub_config.get("webhook_pager_keyboard_template_id") or ""
         ).strip()
-        markdown_tpl = str(
-            sub_config.get("webhook_markdown_template_id") or ""
-        ).strip()
-        public_base_url = str(
-            sub_config.get("webhook_public_base_url") or ""
-        ).strip()
+        markdown_tpl = str(sub_config.get("webhook_markdown_template_id") or "").strip()
+        public_base_url = str(sub_config.get("webhook_public_base_url") or "").strip()
 
     return QQWebhookConfig(
         enable_markdown=enable_md,
@@ -95,6 +91,25 @@ def _parse_qq_webhook_config(config: dict | None) -> QQWebhookConfig:
         markdown_template_id=markdown_tpl,
         public_base_url=public_base_url,
     )
+
+
+def _parse_warframestat_bases(config: dict | None) -> tuple[list[str], list[str]]:
+    def as_url_list(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        out: list[str] = []
+        for item in value:
+            s = str(item or "").strip()
+            if not s:
+                continue
+            if s not in out:
+                out.append(s)
+        return out
+
+    cfg = config or {}
+    api_bases = as_url_list(cfg.get("warframestat_api_bases"))
+    proxy_bases = as_url_list(cfg.get("warframestat_proxy_bases"))
+    return api_bases, proxy_bases
 
 
 class QQResultDispatcher:
@@ -192,7 +207,7 @@ class QQResultDispatcher:
         )
 
 
-@register("warframe_helper", "moemoli", "Warframe 助手", "v0.0.1")
+@register("warframe_helper", "moemoli", "Warframe 助手", "v0.0.3")
 class WarframeHelperPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context, config)
@@ -204,7 +219,11 @@ class WarframeHelperPlugin(Star):
         self.riven_weapon_mapper = WarframeRivenWeaponMapper()
         self.riven_stat_mapper = WarframeRivenStatMapper()
         self.market_client = WarframeMarketClient()
-        self.worldstate_client = WarframeWorldstateClient()
+        ws_api_bases, ws_proxy_bases = _parse_warframestat_bases(self.config)
+        self.worldstate_client = WarframeWorldstateClient(
+            warframestat_api_bases=ws_api_bases,
+            warframestat_proxy_bases=ws_proxy_bases,
+        )
         self.public_export_client = PublicExportClient()
         self.drop_data_client = DropDataClient()
 
@@ -217,7 +236,9 @@ class WarframeHelperPlugin(Star):
         qq_cfg = _parse_qq_webhook_config(self.config)
         # QQ official webhook keyboard template id (message buttons).
         # Note: QQ button templates do NOT support variables.
-        qq_tpl = qq_cfg.keyboard_template_id or QQ_OFFICIAL_WEBHOOK_PAGER_TEMPLATE_ID_DEFAULT
+        qq_tpl = (
+            qq_cfg.keyboard_template_id or QQ_OFFICIAL_WEBHOOK_PAGER_TEMPLATE_ID_DEFAULT
+        )
 
         self._qq_pager = QQOfficialWebhookPager(
             keyboard_template_id=qq_tpl,
@@ -368,9 +389,7 @@ class WarframeHelperPlugin(Star):
         _safe_disable_llm(event, reason="/订阅列表")
         chain = await self._subscriptions.render_list(event=event)
         if self._qq_pager.enabled_for(event):
-            image_path = self._qq_dispatcher.extract_image_path_from_chain(
-                chain.chain
-            )
+            image_path = self._qq_dispatcher.extract_image_path_from_chain(chain.chain)
             if image_path:
                 ok = await self._qq_pager.send_result_markdown_no_keyboard(
                     event,
@@ -435,7 +454,6 @@ class WarframeHelperPlugin(Star):
             yield event.make_result().stop_event()
             return
         yield result
-
 
     @filter.command("wfmap", alias={"wf映射"})
     async def wfmap(self, event: AstrMessageEvent, query: str = ""):
@@ -582,9 +600,7 @@ class WarframeHelperPlugin(Star):
             ),
             WorldstateRow(
                 title="工具",
-                subtitle=(
-                    "/wfmap（别名：wf映射）/wf（本帮助；别名：wf帮助）"
-                ),
+                subtitle=("/wfmap（别名：wf映射）/wf（本帮助；别名：wf帮助）"),
             ),
             WorldstateRow(
                 title="示例",
