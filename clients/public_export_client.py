@@ -87,6 +87,7 @@ class PublicExportClient:
         self._mem_unique_name_maps_full: dict[str, dict[str, str]] = {}
         self._mem_unique_name_norm_maps_full: dict[str, dict[str, str]] = {}
         self._mem_region_maps: dict[str, dict[str, str]] = {}
+        self._mem_region_norm_maps: dict[str, dict[str, str]] = {}
         self._mem_nightwave_map: dict[str, dict[str, tuple[str, int | None]]] = {}
         # localized slug -> [english names]
         self._mem_localized_to_en: dict[str, dict[str, list[str]]] = {}
@@ -111,6 +112,7 @@ class PublicExportClient:
             + len(self._mem_unique_name_maps_full)
             + len(self._mem_unique_name_norm_maps_full)
             + len(self._mem_region_maps)
+            + len(self._mem_region_norm_maps)
             + len(self._mem_nightwave_map)
             + len(self._mem_localized_to_en)
             + len(self._mem_en_to_localized)
@@ -123,6 +125,7 @@ class PublicExportClient:
         self._mem_unique_name_maps_full.clear()
         self._mem_unique_name_norm_maps_full.clear()
         self._mem_region_maps.clear()
+        self._mem_region_norm_maps.clear()
         self._mem_nightwave_map.clear()
         self._mem_localized_to_en.clear()
         self._mem_en_to_localized.clear()
@@ -518,7 +521,9 @@ class PublicExportClient:
         if not norm:
             return None
 
-        def pick_from_norm_map(candidate_map: dict[str, str], key_norm: str) -> str | None:
+        def pick_from_norm_map(
+            candidate_map: dict[str, str], key_norm: str
+        ) -> str | None:
             hit_local = candidate_map.get(key_norm)
             if hit_local:
                 return hit_local
@@ -575,8 +580,50 @@ class PublicExportClient:
         node_unique = (node_unique or "").strip()
         if not node_unique:
             return None
-        mapping = await self.get_region_name_map(language=language)
-        return mapping.get(node_unique)
+        lang = (language or "zh").strip().lower() or "zh"
+        mapping = await self.get_region_name_map(language=lang)
+
+        exact = mapping.get(node_unique)
+        if exact:
+            return exact
+
+        norm = self._normalize_unique_name_key(node_unique)
+        if not norm:
+            return None
+
+        norm_map = self._mem_region_norm_maps.get(lang)
+        if norm_map is None:
+            norm_map = self._build_unique_name_norm_map(mapping)
+            self._mem_region_norm_maps[lang] = norm_map
+            self._evict_map_cache(self._mem_region_norm_maps)
+
+        hit = norm_map.get(norm)
+        if hit:
+            return hit
+
+        parts = [p for p in norm.split("/") if p]
+        if not parts:
+            return None
+
+        candidates: list[tuple[int, str]] = []
+
+        tail = parts[-1]
+        tail_suffix = f"/{tail}"
+        for k, v in norm_map.items():
+            if k.endswith(tail_suffix):
+                candidates.append((len(k), v))
+
+        if len(parts) >= 2:
+            tail2_suffix = f"/{parts[-2]}/{parts[-1]}"
+            for k, v in norm_map.items():
+                if k.endswith(tail2_suffix):
+                    candidates.append((len(k) - 1000, v))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1]
 
     async def get_nightwave_challenge_map(
         self, *, language: str = "zh"
