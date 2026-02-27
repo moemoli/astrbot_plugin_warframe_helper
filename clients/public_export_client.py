@@ -88,6 +88,7 @@ class PublicExportClient:
         self._mem_unique_name_norm_maps_full: dict[str, dict[str, str]] = {}
         self._mem_region_maps: dict[str, dict[str, str]] = {}
         self._mem_region_norm_maps: dict[str, dict[str, str]] = {}
+        self._mem_solnodes_maps: dict[str, dict[str, str]] = {}
         self._mem_nightwave_map: dict[str, dict[str, tuple[str, int | None]]] = {}
         # localized slug -> [english names]
         self._mem_localized_to_en: dict[str, dict[str, list[str]]] = {}
@@ -113,6 +114,7 @@ class PublicExportClient:
             + len(self._mem_unique_name_norm_maps_full)
             + len(self._mem_region_maps)
             + len(self._mem_region_norm_maps)
+            + len(self._mem_solnodes_maps)
             + len(self._mem_nightwave_map)
             + len(self._mem_localized_to_en)
             + len(self._mem_en_to_localized)
@@ -126,6 +128,7 @@ class PublicExportClient:
         self._mem_unique_name_norm_maps_full.clear()
         self._mem_region_maps.clear()
         self._mem_region_norm_maps.clear()
+        self._mem_solnodes_maps.clear()
         self._mem_nightwave_map.clear()
         self._mem_localized_to_en.clear()
         self._mem_en_to_localized.clear()
@@ -620,10 +623,84 @@ class PublicExportClient:
                     candidates.append((len(k) - 1000, v))
 
         if not candidates:
+            if "crewbattlenode" in norm:
+                return await self._fallback_translate_crew_battle_node(
+                    node_unique, language=lang
+                )
             return None
 
         candidates.sort(key=lambda x: x[0])
         return candidates[0][1]
+
+    async def _get_solnodes_map(self, *, language: str) -> dict[str, str]:
+        lang = (language or "zh").strip().lower() or "zh"
+        cached = self._mem_solnodes_maps.get(lang)
+        if cached is not None:
+            return cached
+
+        lang_variants: list[str]
+        if lang.startswith("zh"):
+            lang_variants = ["zh-hans", "zh", "en"]
+        else:
+            lang_variants = [lang, "en"]
+
+        urls: list[str] = []
+        for lv in lang_variants:
+            urls.extend(
+                [
+                    f"https://raw.githubusercontent.com/WFCD/warframe-worldstate-data/master/data/{lv}/solNodes.json",
+                    f"https://cdn.jsdelivr.net/gh/WFCD/warframe-worldstate-data@master/data/{lv}/solNodes.json",
+                ]
+            )
+
+        data = await fetch_json(urls, timeout_sec=min(self._http_timeout_sec, 18.0))
+        out: dict[str, str] = {}
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if isinstance(k, str) and isinstance(v, str) and k and v:
+                    out[k] = v
+
+        self._mem_solnodes_maps[lang] = out
+        self._evict_map_cache(self._mem_solnodes_maps)
+        return out
+
+    def _localize_crew_battle_label(self, node_unique: str, mapped: str | None) -> str:
+        text = (mapped or "").strip()
+        if text:
+            rep = {
+                "Earth Proxima": "地球九重天",
+                "Venus Proxima": "金星九重天",
+                "Saturn Proxima": "土星九重天",
+                "Neptune Proxima": "海王星九重天",
+                "Pluto Proxima": "冥王星九重天",
+                "Veil Proxima": "面纱九重天",
+            }
+            for en, zh in rep.items():
+                text = text.replace(en, zh)
+            if text:
+                return text
+
+        m = re.search(r"crewbattlenode\s*(\d+)", node_unique, flags=re.IGNORECASE)
+        if m:
+            return f"九重天节点{m.group(1)}"
+        return "九重天节点"
+
+    async def _fallback_translate_crew_battle_node(
+        self, node_unique: str, *, language: str
+    ) -> str:
+        mapping = await self._get_solnodes_map(language=language)
+
+        direct = mapping.get(node_unique)
+        if direct:
+            return self._localize_crew_battle_label(node_unique, direct)
+
+        norm = self._normalize_unique_name_key(node_unique)
+        if norm:
+            for k, v in mapping.items():
+                if self._normalize_unique_name_key(k) == norm:
+                    return self._localize_crew_battle_label(node_unique, v)
+
+        return self._localize_crew_battle_label(node_unique, None)
 
     async def get_nightwave_challenge_map(
         self, *, language: str = "zh"
