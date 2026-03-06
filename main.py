@@ -19,6 +19,10 @@ from .http_utils import set_direct_domains, set_proxy_url
 from .mappers.riven_mapping import WarframeRivenWeaponMapper
 from .mappers.riven_stats_mapping import WarframeRivenStatMapper
 from .mappers.term_mapping import WarframeTermMapper
+from .renderers.template_loader import (
+    set_current_render_command,
+    set_render_template_name,
+)
 from .renderers.worldstate_render import (
     WorldstateRow,
     render_worldstate_rows_image_to_file,
@@ -41,6 +45,8 @@ class QQWebhookConfig:
 
 
 def _safe_disable_llm(event: AstrMessageEvent, *, reason: str) -> None:
+    if reason.startswith("/"):
+        set_current_render_command(reason)
     try:
         event.should_call_llm(True)
     except Exception as exc:
@@ -110,6 +116,12 @@ def _parse_warframestat_bases(config: dict | None) -> tuple[list[str], list[str]
     api_bases = as_url_list(cfg.get("warframestat_api_bases"))
     proxy_bases = as_url_list(cfg.get("warframestat_proxy_bases"))
     return api_bases, proxy_bases
+
+
+def _parse_render_template_name(config: dict | None) -> str:
+    cfg = config or {}
+    name = str(cfg.get("render_template_name") or "").strip()
+    return name or "default"
 
 
 class QQResultDispatcher:
@@ -207,11 +219,13 @@ class QQResultDispatcher:
         )
 
 
-@register("warframe_helper", "moemoli", "Warframe 助手", "v0.0.3")
+@register("warframe_helper", "moemoli", "Warframe 助手", "v0.0.4")
 class WarframeHelperPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context, config)
         self.config = config
+
+        set_render_template_name(_parse_render_template_name(self.config))
 
         _apply_proxy_config(self.config)
 
@@ -640,6 +654,7 @@ class WarframeHelperPlugin(Star):
         - /wm 猴p pc 收
         - /wm 猴p pc 收 zh 10
         """
+        set_current_render_command("/wm")
         async for res in cmd_wm(
             context=self.context,
             event=event,
@@ -667,6 +682,7 @@ class WarframeHelperPlugin(Star):
         示例：/wmr 绝路 双暴 负任意 12段 r槽
         语义：武器=绝路，正面=暴击率+暴击伤害，负面任意（但需要有负面），MR>=12，极性=R(zenurik)
         """
+        set_current_render_command("/wmr")
         async for res in cmd_wmr(
             context=self.context,
             event=event,

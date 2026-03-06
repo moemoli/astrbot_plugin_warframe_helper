@@ -89,7 +89,9 @@ class PublicExportClient:
         self._mem_region_maps: dict[str, dict[str, str]] = {}
         self._mem_region_norm_maps: dict[str, dict[str, str]] = {}
         self._mem_solnodes_maps: dict[str, dict[str, str]] = {}
-        self._mem_nightwave_map: dict[str, dict[str, tuple[str, int | None]]] = {}
+        self._mem_nightwave_map: dict[
+            str, dict[str, tuple[str, int | None, str | None]]
+        ] = {}
         self._mem_mission_type_map: dict[str, dict[str, str]] = {}
         self._mem_fissure_tier_map: dict[str, dict[str, str]] = {}
         self._mem_faction_map: dict[str, dict[str, str]] = {}
@@ -734,7 +736,7 @@ class PublicExportClient:
 
     async def get_nightwave_challenge_map(
         self, *, language: str = "zh"
-    ) -> dict[str, tuple[str, int | None]]:
+    ) -> dict[str, tuple[str, int | None, str | None]]:
         lang = (language or "zh").strip().lower() or "zh"
         cached = self._mem_nightwave_map.get(lang)
         if cached is not None:
@@ -743,7 +745,7 @@ class PublicExportClient:
         data = await self.fetch_export(
             f"ExportSortieRewards_{lang}.json", language=lang
         )
-        out: dict[str, tuple[str, int | None]] = {}
+        out: dict[str, tuple[str, int | None, str | None]] = {}
         if isinstance(data, dict):
             nw = data.get("ExportNightwave")
             if isinstance(nw, dict):
@@ -755,11 +757,17 @@ class PublicExportClient:
                         uniq = c.get("uniqueName")
                         name = c.get("name")
                         standing = c.get("standing")
+                        description = (
+                            c.get("description")
+                            if isinstance(c.get("description"), str)
+                            else None
+                        )
                         if not isinstance(uniq, str) or not isinstance(name, str):
                             continue
                         out[uniq] = (
                             name,
                             standing if isinstance(standing, int) else None,
+                            description.strip() if isinstance(description, str) else None,
                         )
 
         self._mem_nightwave_map[lang] = out

@@ -376,6 +376,7 @@ class ArbitrationInfo:
 @dataclass(frozen=True, slots=True)
 class NightwaveChallenge:
     title: str
+    description: str | None
     is_daily: bool
     reputation: int | None
     eta: str
@@ -1200,17 +1201,26 @@ class WarframeWorldstateClient:
 
                 title: str | None = None
                 standing: int | None = None
+                description: str | None = None
                 mapped = mapping.get(uniq)
                 if mapped:
-                    title, standing = mapped
+                    title, standing, description = mapped
                 else:
                     loose = await self._public_export.translate_unique_name_loose(
                         uniq, language=language
                     )
                     if isinstance(loose, str) and loose.strip():
                         title = loose.strip()
+                    raw_desc = (
+                        c.get("Description")
+                        if isinstance(c.get("Description"), str)
+                        else c.get("description")
+                    )
+                    if isinstance(raw_desc, str) and raw_desc.strip():
+                        description = raw_desc.strip()
                 if not title:
                     title = uniq.split("/")[-1]
+                title_text = str(title).strip() or uniq.split("/")[-1]
 
                 is_daily = bool(c.get("Daily"))
                 c_expiry = (
@@ -1218,7 +1228,8 @@ class WarframeWorldstateClient:
                 )
                 challenges.append(
                     NightwaveChallenge(
-                        title=title,
+                        title=title_text,
+                        description=description,
                         is_daily=is_daily,
                         reputation=standing,
                         eta=_format_eta_from_dt(c_expiry),
@@ -1257,10 +1268,18 @@ class WarframeWorldstateClient:
                         )
                         if not title:
                             continue
+                        title_text = str(title).strip()
+                        if not title_text:
+                            continue
                         rep = (
                             c.get("reputation")
                             if isinstance(c.get("reputation"), int)
                             else None
+                        )
+                        desc = (
+                            c.get("desc")
+                            if isinstance(c.get("desc"), str)
+                            else c.get("description")
                         )
                         c_expiry = (
                             _parse_any_datetime(c.get("expiry") or c.get("endDate"))
@@ -1268,7 +1287,12 @@ class WarframeWorldstateClient:
                         )
                         challenges.append(
                             NightwaveChallenge(
-                                title=title,
+                                title=title_text,
+                                description=(
+                                    desc.strip()
+                                    if isinstance(desc, str) and desc.strip()
+                                    else None
+                                ),
                                 is_daily=bool(c.get("isDaily")),
                                 reputation=rep,
                                 eta=_format_eta_from_dt(c_expiry),

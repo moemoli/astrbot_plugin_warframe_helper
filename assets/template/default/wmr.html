@@ -1,0 +1,162 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 980px;
+      background: #f8fafc;
+      font-family: "Noto Sans CJK SC", "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
+      color: #0f172a;
+    }
+
+    body {
+      padding: 24px;
+      background:
+        radial-gradient(720px 300px at 0% -8%, #dbeafe 0%, rgba(219, 234, 254, 0) 72%),
+        radial-gradient(980px 380px at 100% -22%, #e0e7ff 0%, rgba(224, 231, 255, 0) 70%),
+        #f8fafc;
+    }
+
+    .wrap { width: 932px; }
+
+    .head {
+      background-size: cover;
+      background-position: center;
+      border-radius: 16px;
+      border: 1px solid #dbe4ef;
+      padding: 18px;
+      box-shadow: 0 8px 24px rgba(30, 41, 59, 0.12);
+      margin-bottom: 12px;
+    }
+
+    .head-main { display: flex; align-items: center; gap: 14px; }
+    .weapon-icon {
+      width: 72px;
+      height: 72px;
+      border-radius: 50%;
+      object-fit: cover;
+      border: 2px solid rgba(255, 255, 255, 0.9);
+      box-shadow: 0 4px 16px rgba(15, 23, 42, 0.18);
+      background: rgba(255, 255, 255, 0.86);
+      flex: none;
+    }
+
+    .title { font-size: 36px; line-height: 1.22; font-weight: 760; text-shadow: 0 1px 0 rgba(255, 255, 255, 0.65); }
+    .summary { margin-top: 8px; font-size: 19px; line-height: 1.35; color: #334155; }
+    .rows { display: flex; flex-direction: column; gap: 10px; }
+
+    .row {
+      position: relative;
+      border-radius: 14px;
+      border: 1px solid #e2e8f0;
+      background: #ffffff;
+      min-height: 124px;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      overflow: hidden;
+      box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
+    }
+
+    .row::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 8px; background: #d1d5db; }
+    .row.ingame::before { background: #10b981; }
+    .row.online::before { background: #f59e0b; }
+
+    .left { display: flex; align-items: flex-start; gap: 12px; min-width: 0; margin-left: 4px; flex: 1; margin-right: 12px; }
+    .avatar { width: 52px; height: 52px; border-radius: 50%; object-fit: cover; border: 1px solid #dbe4ef; background: #e2e8f0; flex: none; margin-top: 2px; }
+    .meta { min-width: 0; flex: 1; }
+    .line-1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 5px; }
+
+    .name { font-size: 24px; line-height: 1.2; font-weight: 710; margin-right: 4px; color: #0f172a; }
+    .status-pill { font-size: 16px; line-height: 1; border-radius: 999px; padding: 4px 9px; background: #f1f5f9; color: #334155; border: 1px solid #dbe4ef; }
+    .row.ingame .status-pill { background: #dcfce7; color: #166534; border-color: #86efac; }
+    .row.online .status-pill { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+
+    .mini { font-size: 15px; line-height: 1; color: #64748b; border-radius: 999px; padding: 4px 8px; background: #f8fafc; border: 1px solid #e2e8f0; }
+    .attr { font-size: 18px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 700px; }
+    .attr.pos { color: #059669; }
+    .attr.neg { color: #dc2626; margin-top: 3px; }
+
+    .right { font-size: 34px; line-height: 1.05; font-weight: 780; color: #2563eb; text-align: right; flex: none; }
+  </style>
+</head>
+<body>
+    {#
+    模板: wmr.html（指令 /wmr）
+    渲染器: renderers/wmr_render.py
+
+    顶层对象:
+    - page: dict
+
+    固定参数:
+    - page.title: str
+      用途: 结果标题，建议包含武器名 + 平台 + 排序/条数。
+    - page.summary: str
+      用途: 筛选摘要（可选），建议汇总关键词、段位、负词条过滤。
+    - page.weapon_img_uri: str
+      用途: 武器头像 data URI；为空时不渲染图标。
+    - page.weapon_background_style: str
+      用途: 头部背景样式（完整 style 片段）。
+
+    - page.rows: list[dict]
+      用途: 紫卡拍卖行行数据。
+      行参数（row）:
+      - row.avatar: str（必填） 卖家头像。
+      - row.name: str（必填） 卖家名。
+      - row.status_text: str（必填） 状态文本。
+      - row.status_class: str（必填） 状态样式类（ingame|online|offline）。
+      - row.mr_text: str（必填） 最低段位。
+      - row.polarity_text: str（必填） 极性。
+      - row.rr_text: str（必填） 洗练次数。
+      - row.pos_text: str（必填） 正词条文本。
+      - row.neg_text: str（必填） 负词条文本；无负词条也建议填无负面词条。
+      - row.price_text: str（必填） 价格文本。
+
+    本指令常见需求参数分配:
+    - 条件筛选需求: page.summary 展示用户输入过滤条件，便于核对。
+    - 价格对比需求: row.price_text 放最终比较值，row.pos_text/row.neg_text 保持简洁可读。
+
+    兼容性约定:
+    - page.summary 为空时模板自动隐藏摘要区。
+    - 需要多行词条时可把 pos_text/neg_text 改为 list 并在模板内二次 for 渲染。
+  #}
+  <main class="wrap">
+    <header class="head" style="{{ page.weapon_background_style }}">
+      <div class="head-main">
+        {% if page.weapon_img_uri %}<img class="weapon-icon" src="{{ page.weapon_img_uri }}" alt="weapon" />{% endif %}
+        <div class="title">{{ page.title }}</div>
+      </div>
+      {% if page.summary %}<div class="summary">{{ page.summary }}</div>{% endif %}
+    </header>
+
+    <section class="rows">
+      {% for row in page.rows %}
+      <article class="row {{ row.status_class }}">
+        <div class="left">
+          <img class="avatar" src="{{ row.avatar }}" alt="avatar" />
+          <div class="meta">
+            <div class="line-1">
+              <span class="name">{{ row.name }}</span>
+              <span class="status-pill">{{ row.status_text }}</span>
+              <span class="mini">MR{{ row.mr_text }}</span>
+              <span class="mini">极性 {{ row.polarity_text }}</span>
+              <span class="mini">洗练 {{ row.rr_text }}</span>
+            </div>
+            <div class="attr pos">{{ row.pos_text }}</div>
+            <div class="attr neg">{{ row.neg_text }}</div>
+          </div>
+        </div>
+        <div class="right">{{ row.price_text }}</div>
+      </article>
+      {% endfor %}
+    </section>
+  </main>
+</body>
+</html>
+

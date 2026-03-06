@@ -34,6 +34,12 @@
         "description": "解析模型",
         "hint": "在wm/wmr等指令中，当用户输入了无法识别的缩写时，插件会使用该解析模型尝试解析。"
     },
+    "render_template_name": {
+        "type": "string",
+        "default": "default",
+        "description": "渲染模板名称",
+        "hint": "用于选择 HTML 模板目录名。插件会读取 assets/template/<模板名>/ 下的 status_list.html、cycle_status.html、wm.html、wmr.html；若不存在则回退到 assets/template/default/。"
+    },
     "qq_official": {
         "description": "QQ官方机器人配置",
         "type": "object",

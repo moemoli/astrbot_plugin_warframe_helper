@@ -38,6 +38,7 @@ async def render_worldstate_cycle(
     left: str,
     start_time: str | None,
     end_time: str | None,
+    reward_rows: list[WorldstateRow] | None,
     accent: tuple[int, int, int, int],
     plain_prefix: str,
 ):
@@ -53,6 +54,7 @@ async def render_worldstate_cycle(
         title=title,
         header_lines=[f"平台：{platform_norm}"],
         rows=rows,
+        reward_rows=reward_rows,
         accent=accent,
     )
     if rendered:

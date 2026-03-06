@@ -468,12 +468,15 @@ async def cmd_nightwave(
     for c in info.active_challenges[:12]:
         kind = "日常" if c.is_daily else "周常"
         rep = f"+{c.reputation}" if c.reputation is not None else ""
+        subtitle = (c.description or "").strip()
+        if not subtitle:
+            subtitle = rep
         rows.append(
             WorldstateRow(
                 title=c.title,
-                subtitle=rep or None,
+                subtitle=subtitle or None,
                 right=f"剩余{c.eta}",
-                tag=kind,
+                tag=(f"{kind} {rep}".strip() if rep else kind),
             )
         )
 
@@ -489,7 +492,8 @@ async def cmd_nightwave(
     for c in info.active_challenges[:12]:
         kind = "日常" if c.is_daily else "周常"
         rep = f" +{c.reputation}" if c.reputation is not None else ""
-        lines.append(f"- [{kind}] {c.title}{rep} | 剩余{c.eta}")
+        desc = f" | {c.description}" if c.description else ""
+        lines.append(f"- [{kind}] {c.title}{rep}{desc} | 剩余{c.eta}")
 
     return event.plain_result("\n".join(lines))
 
@@ -574,6 +578,7 @@ async def cmd_plains(
                 left=left,
                 start_time=getattr(info, "start_time", None),
                 end_time=getattr(info, "end_time", None),
+                reward_rows=[],
                 accent=(20, 184, 166, 255),
                 plain_prefix="夜灵平原",
             )
@@ -609,6 +614,9 @@ async def cmd_plains(
             )
 
             rows: list[WorldstateRow] = [
+                WorldstateRow(title=f"当前：{state}", right=f"剩余{left}"),
+            ]
+            reward_rows: list[WorldstateRow] = [
                 WorldstateRow(title="普通轮回", subtitle=normal, right=None),
                 WorldstateRow(title="钢铁轮回", subtitle=steel, right=None),
             ]
@@ -616,6 +624,7 @@ async def cmd_plains(
                 title="双衍王境",
                 header_lines=header_lines,
                 rows=rows,
+                reward_rows=reward_rows,
                 accent=(20, 184, 166, 255),
             )
             if rendered:
@@ -650,6 +659,7 @@ async def cmd_plains(
                 left=left,
                 start_time=getattr(info, "start_time", None),
                 end_time=getattr(info, "end_time", None),
+                reward_rows=[],
                 accent=(20, 184, 166, 255),
                 plain_prefix="奥布山谷",
             )
@@ -671,6 +681,7 @@ async def cmd_plains(
             left=left,
             start_time=getattr(info, "start_time", None),
             end_time=getattr(info, "end_time", None),
+            reward_rows=[],
             accent=(20, 184, 166, 255),
             plain_prefix="魔胎之境",
         )
@@ -803,6 +814,7 @@ async def cmd_cycle(
             left=left,
             start_time=getattr(info, "start_time", None),
             end_time=getattr(info, "end_time", None),
+            reward_rows=[],
             accent=(20, 184, 166, 255),
             plain_prefix="夜灵平原",
         )
@@ -825,6 +837,7 @@ async def cmd_cycle(
             left=left,
             start_time=getattr(info, "start_time", None),
             end_time=getattr(info, "end_time", None),
+            reward_rows=[],
             accent=(20, 184, 166, 255),
             plain_prefix="魔胎之境",
         )
@@ -849,6 +862,7 @@ async def cmd_cycle(
             left=left,
             start_time=getattr(info, "start_time", None),
             end_time=getattr(info, "end_time", None),
+            reward_rows=[],
             accent=(20, 184, 166, 255),
             plain_prefix="地球",
         )
@@ -873,6 +887,7 @@ async def cmd_cycle(
             left=left,
             start_time=getattr(info, "start_time", None),
             end_time=getattr(info, "end_time", None),
+            reward_rows=[],
             accent=(20, 184, 166, 255),
             plain_prefix="奥布山谷",
         )
@@ -908,6 +923,9 @@ async def cmd_cycle(
             else "(未返回)"
         )
         rows: list[WorldstateRow] = [
+            WorldstateRow(title=f"当前：{state}", right=f"剩余{left}"),
+        ]
+        reward_rows: list[WorldstateRow] = [
             WorldstateRow(title="普通轮回", subtitle=normal, right=None),
             WorldstateRow(title="钢铁轮回", subtitle=steel, right=None),
         ]
@@ -916,6 +934,7 @@ async def cmd_cycle(
             title="双衍王境",
             header_lines=header_lines,
             rows=rows,
+            reward_rows=reward_rows,
             accent=(20, 184, 166, 255),
         )
         if rendered:
@@ -951,14 +970,15 @@ async def cmd_duviri_circuit_rewards(
     normal = "、".join(list(info.normal_choices)) or "(未返回)"
     steel = "、".join(list(info.steel_choices)) or "(未返回)"
 
-    rows = [
+    reward_rows = [
         WorldstateRow(title="普通奖励", subtitle=normal, right=None),
         WorldstateRow(title="钢铁奖励", subtitle=steel, right=None),
     ]
     rendered = await render_worldstate_rows_image_to_file(
         title="轮回奖励",
         header_lines=[f"平台：{platform_norm}", f"轮回重置：{info.eta}"],
-        rows=rows,
+        rows=[],
+        reward_rows=reward_rows,
         accent=(20, 184, 166, 255),
     )
     if rendered:
