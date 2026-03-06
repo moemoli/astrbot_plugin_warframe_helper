@@ -109,3 +109,49 @@
 {{.hint}}
 
 ```
+
+## 远程浏览器配置
+
+当 AstrBot 运行在 Linux Docker 且容器内缺少 Chromium 运行库时，推荐使用远程浏览器服务。
+
+### 1) 一键启动 browserless
+
+```bash
+sudo docker run -d --name browserless \
+  --restart unless-stopped \
+  -p 3000:3000 \
+  -e TOKEN=astrbot-token \
+  -e MAX_CONCURRENT_SESSIONS=5 \
+  -e CONNECTION_TIMEOUT=120000 \
+  browserless/chrome:latest
+```
+
+### 2) 在插件配置中填写远程地址
+
+新增配置项：`render_browser_ws_endpoint`
+
+```json
+{
+  "render_browser_ws_endpoint": "ws://宿主机内网ip:3000?token=astrbot-token"
+}
+```
+
+如果 AstrBot 与 browserless 运行在同一 Docker 网络（不同容器），可改为：
+
+```json
+{
+  "render_browser_ws_endpoint": "ws://browserless:3000?token=astrbot-token"
+}
+```
+
+### 3) 服务可用性检查
+
+```bash
+curl -s http://127.0.0.1:3000/json/version
+```
+
+返回浏览器版本 JSON 即表示远程服务可用。
+
+### 4) 未配置远程地址时的默认行为
+
+当 `render_browser_ws_endpoint` 为空时，插件会直接使用默认文生图（纯文本图片）兜底，不再尝试启动本地浏览器。

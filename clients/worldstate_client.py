@@ -150,6 +150,83 @@ def _parse_any_datetime(value: Any) -> datetime | None:
     return None
 
 
+_NIGHTWAVE_DT_MAP: dict[str, str] = {
+    "IMPACT": "冲击",
+    "PUNCTURE": "穿刺",
+    "SLASH": "切割",
+    "HEAT": "火焰",
+    "FIRE": "火焰",
+    "COLD": "冰冻",
+    "ELECTRIC": "电击",
+    "ELECTRICITY": "电击",
+    "TOXIN": "毒素",
+    "BLAST": "爆炸",
+    "CORROSIVE": "腐蚀",
+    "GAS": "毒气",
+    "MAGNETIC": "磁力",
+    "RADIATION": "辐射",
+    "VIRAL": "病毒",
+    "VOID": "虚空",
+    "TRUE": "真实",
+}
+
+
+def _normalize_nightwave_description(
+    text: str | None,
+    *,
+    challenge: dict[str, Any] | None = None,
+) -> str | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+
+    c = challenge or {}
+
+    def _pick_value(token: str) -> str | None:
+        for key in (token, token.lower(), token.title()):
+            val = c.get(key)
+            if isinstance(val, (int, float)):
+                return str(int(val) if isinstance(val, float) and val.is_integer() else val)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return None
+
+    def _replace_dt(match: re.Match[str]) -> str:
+        key = str(match.group(1) or "").strip().upper()
+        if not key:
+            return ""
+        return _NIGHTWAVE_DT_MAP.get(key, key)
+
+    def _replace_pipe(match: re.Match[str]) -> str:
+        token = str(match.group(1) or "").strip().upper()
+        if not token:
+            return ""
+
+        picked = _pick_value(token)
+        if picked:
+            return picked
+
+        fallback = {
+            "COUNT": "数量",
+            "MISSIONCOUNT": "任务数量",
+            "MINUTES": "分钟",
+            "SECONDS": "秒",
+            "HOURS": "小时",
+            "DAMAGE": "伤害",
+            "FACTION": "阵营",
+            "WEAPON": "武器",
+            "ABILITY": "技能",
+            "ENEMIES": "敌人",
+        }
+        return fallback.get(token, token.lower())
+
+    out = raw
+    out = re.sub(r"<\s*DT_([A-Z_]+)\s*>", _replace_dt, out, flags=re.IGNORECASE)
+    out = re.sub(r"\|([A-Z0-9_]+)\|", _replace_pipe, out, flags=re.IGNORECASE)
+    out = re.sub(r"\s+", " ", out).strip()
+    return out or None
+
+
 def _format_eta_from_dt(expiry: datetime | None) -> str:
     if not expiry:
         return "未知"
@@ -1205,6 +1282,10 @@ class WarframeWorldstateClient:
                 mapped = mapping.get(uniq)
                 if mapped:
                     title, standing, description = mapped
+                    description = _normalize_nightwave_description(
+                        description,
+                        challenge=c,
+                    )
                 else:
                     loose = await self._public_export.translate_unique_name_loose(
                         uniq, language=language
@@ -1217,7 +1298,10 @@ class WarframeWorldstateClient:
                         else c.get("description")
                     )
                     if isinstance(raw_desc, str) and raw_desc.strip():
-                        description = raw_desc.strip()
+                        description = _normalize_nightwave_description(
+                            raw_desc,
+                            challenge=c,
+                        )
                 if not title:
                     title = uniq.split("/")[-1]
                 title_text = str(title).strip() or uniq.split("/")[-1]
@@ -1281,6 +1365,10 @@ class WarframeWorldstateClient:
                             if isinstance(c.get("desc"), str)
                             else c.get("description")
                         )
+                        desc_text = _normalize_nightwave_description(
+                            desc if isinstance(desc, str) else None,
+                            challenge=c,
+                        )
                         c_expiry = (
                             _parse_any_datetime(c.get("expiry") or c.get("endDate"))
                             or fallback_expiry
@@ -1288,11 +1376,7 @@ class WarframeWorldstateClient:
                         challenges.append(
                             NightwaveChallenge(
                                 title=title_text,
-                                description=(
-                                    desc.strip()
-                                    if isinstance(desc, str) and desc.strip()
-                                    else None
-                                ),
+                                description=desc_text,
                                 is_daily=bool(c.get("isDaily")),
                                 reputation=rep,
                                 eta=_format_eta_from_dt(c_expiry),

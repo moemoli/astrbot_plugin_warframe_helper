@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any, Callable, cast
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -23,6 +24,7 @@ from .renderers.template_loader import (
     set_current_render_command,
     set_render_template_name,
 )
+from .renderers.html_snapshot import set_render_browser_ws_endpoint
 from .renderers.worldstate_render import (
     WorldstateRow,
     render_worldstate_rows_image_to_file,
@@ -122,6 +124,17 @@ def _parse_render_template_name(config: dict | None) -> str:
     cfg = config or {}
     name = str(cfg.get("render_template_name") or "").strip()
     return name or "default"
+
+
+def _parse_render_browser_ws_endpoint(config: dict | None) -> str:
+    cfg = config or {}
+    endpoint = str(cfg.get("render_browser_ws_endpoint") or "").strip()
+    return endpoint
+
+
+def _parse_enable_no_prefix_commands(config: dict | None) -> bool:
+    cfg = config or {}
+    return bool(cfg.get("enable_no_prefix_commands"))
 
 
 class QQResultDispatcher:
@@ -226,6 +239,12 @@ class WarframeHelperPlugin(Star):
         self.config = config
 
         set_render_template_name(_parse_render_template_name(self.config))
+        set_render_browser_ws_endpoint(
+            _parse_render_browser_ws_endpoint(self.config)
+        )
+        self._enable_no_prefix_commands = _parse_enable_no_prefix_commands(
+            self.config
+        )
 
         _apply_proxy_config(self.config)
 
@@ -316,6 +335,127 @@ class WarframeHelperPlugin(Star):
             page=page,
             hint=hint,
         )
+
+    def _no_prefix_handler_map(self) -> dict[str, Callable[..., Any]]:
+        return {
+            "wf": self.wf_help,
+            "wf帮助": self.wf_help,
+            "wfmap": self.wfmap,
+            "wf映射": self.wfmap,
+            "wm": self.wm,
+            "wmr": self.wmr,
+            "wfp": self.wf_page,
+            "订阅": self.wf_subscribe,
+            "退订": self.wf_unsubscribe,
+            "取消订阅": self.wf_unsubscribe,
+            "订阅列表": self.wf_subscribe_list,
+            "执行官猎杀": self.wf_archon_hunt,
+            "archon": self.wf_archon_hunt,
+            "执行官": self.wf_archon_hunt,
+            "钢铁奖励": self.wf_steel_reward,
+            "steelreward": self.wf_steel_reward,
+            "sp奖励": self.wf_steel_reward,
+            "突击": self.wf_sortie,
+            "sortie": self.wf_sortie,
+            "警报": self.wf_alerts,
+            "alerts": self.wf_alerts,
+            "裂缝": self.wf_fissures,
+            "fissure": self.wf_fissures,
+            "九重天裂缝": self.wf_fissures_storm,
+            "风暴裂缝": self.wf_fissures_storm,
+            "钢铁裂缝": self.wf_fissures_hard,
+            "普通裂缝": self.wf_fissures_normal,
+            "奸商": self.wf_void_trader,
+            "虚空商人": self.wf_void_trader,
+            "baro": self.wf_void_trader,
+            "仲裁": self.wf_arbitration,
+            "arbitration": self.wf_arbitration,
+            "电波": self.wf_nightwave,
+            "夜波": self.wf_nightwave,
+            "nightwave": self.wf_nightwave,
+            "平原": self.wf_plains,
+            "夜灵平原": self.wf_cetus_cycle,
+            "希图斯": self.wf_cetus_cycle,
+            "cetus": self.wf_cetus_cycle,
+            "poe": self.wf_cetus_cycle,
+            "魔胎之境": self.wf_cambion_cycle,
+            "魔胎": self.wf_cambion_cycle,
+            "cambion": self.wf_cambion_cycle,
+            "地球昼夜": self.wf_earth_cycle,
+            "地球循环": self.wf_earth_cycle,
+            "地球": self.wf_earth_cycle,
+            "earth": self.wf_earth_cycle,
+            "奥布山谷": self.wf_vallis_cycle,
+            "金星平原": self.wf_vallis_cycle,
+            "福尔图娜": self.wf_vallis_cycle,
+            "vallis": self.wf_vallis_cycle,
+            "orb": self.wf_vallis_cycle,
+            "orbvallis": self.wf_vallis_cycle,
+            "fortuna": self.wf_vallis_cycle,
+            "双衍王境": self.wf_duviri_cycle,
+            "双衍": self.wf_duviri_cycle,
+            "双衍循环": self.wf_duviri_cycle,
+            "双衍王镜": self.wf_duviri_cycle,
+            "duviri": self.wf_duviri_cycle,
+            "轮回奖励": self.wf_duviri_circuit_rewards,
+            "双衍轮回": self.wf_duviri_circuit_rewards,
+            "双衍轮回奖励": self.wf_duviri_circuit_rewards,
+            "circuit": self.wf_duviri_circuit_rewards,
+            "武器": self.wf_weapon,
+            "weapon": self.wf_weapon,
+            "wfweapon": self.wf_weapon,
+            "战甲": self.wf_warframe,
+            "warframe": self.wf_warframe,
+            "frame": self.wf_warframe,
+            "wfwarframe": self.wf_warframe,
+            "mod": self.wf_mod,
+            "mods": self.wf_mod,
+            "模组": self.wf_mod,
+            "掉落": self.wf_drops,
+            "drop": self.wf_drops,
+            "drops": self.wf_drops,
+            "遗物": self.wf_relic,
+            "relic": self.wf_relic,
+            "relics": self.wf_relic,
+            "入侵": self.wf_invasions,
+            "invasions": self.wf_invasions,
+            "集团": self.wf_syndicates,
+            "syndicate": self.wf_syndicates,
+            "syndicates": self.wf_syndicates,
+        }
+
+    @filter.regex(r"^\S(?:[\s\S]*)$")
+    async def no_prefix_command_router(self, event: AstrMessageEvent):
+        if not self._enable_no_prefix_commands:
+            return
+
+        text = (event.get_message_str() or "").strip()
+        if not text or text.startswith("/"):
+            return
+
+        lowered = text.lower()
+        if lowered in {"上一页", "下一页", "prev", "previous", "next"}:
+            return
+        if lowered.isdigit():
+            return
+
+        token, _, rest = text.partition(" ")
+        command = token.strip().lower()
+        raw_args = rest.strip()
+
+        handler = self._no_prefix_handler_map().get(command)
+        if handler is None:
+            return
+        handler_fn = cast(Callable[..., Any], handler)
+
+        _safe_disable_llm(event, reason=f"no_prefix:{command}")
+
+        try:
+            async for res in handler_fn(event, raw_args):
+                yield res
+        except TypeError:
+            async for res in handler_fn(event):
+                yield res
 
     @filter.command("订阅")
     async def wf_subscribe(
