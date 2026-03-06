@@ -7,8 +7,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from pyppeteer import launch
-
 from astrbot.api import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
@@ -83,6 +81,9 @@ async def render_html_to_png_file(
 
     browser = None
     try:
+        # Lazy import keeps plugin load resilient when optional browser deps are broken.
+        from pyppeteer import launch
+
         launch_kwargs: dict[str, Any] = {
             "headless": True,
             "args": [

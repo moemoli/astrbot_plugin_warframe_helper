@@ -5,4 +5,5 @@ aiohttp
 Pillow
 botpy
 pyppeteer
+websockets>=15.0.1
 Jinja2
