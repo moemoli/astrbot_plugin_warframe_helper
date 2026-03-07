@@ -263,7 +263,7 @@ class QQResultDispatcher:
         )
 
 
-@register("warframe_helper", "moemoli", "Warframe 助手", "v0.1.0")
+@register("warframe_helper", "moemoli", "Warframe 助手", "v0.1.2")
 class WarframeHelperPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context, config)
