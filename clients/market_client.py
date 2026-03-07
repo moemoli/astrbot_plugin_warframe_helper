@@ -59,23 +59,32 @@ class WarframeMarketClient:
         for k, _ in items[:over]:
             cache.pop(k, None)
 
-    async def fetch_orders_by_item_id(
-        self, item_id: str
+    async def fetch_orders_by_item_slug(
+        self,
+        item_slug: str,
+        *,
+        platform: str | None = None,
     ) -> list[MarketOrder] | None:
-        """从 warframe.market v2 拉取某个 item_id 的全部订单（包含所有平台）。"""
+        """从 warframe.market v2 拉取某个 item slug 的订单。"""
 
-        if not item_id:
+        slug = str(item_slug or "").strip().lower()
+        if not slug:
             return []
 
+        platform_norm = str(platform or "").strip().lower() or "pc"
+        cache_key = f"{slug}|{platform_norm}"
+
         now = time.time()
-        cached = self._orders_cache.get(item_id)
+        cached = self._orders_cache.get(cache_key)
         if cached and (now - cached[0]) <= self._cache_ttl_sec:
             return cached[1]
 
-        url = f"{WARFRAME_MARKET_V2_BASE_URL}/orders/item/{item_id}"
+        url = f"{WARFRAME_MARKET_V2_BASE_URL}/orders/item/{slug}"
         headers = {
             "User-Agent": "AstrBot/warframe_helper (+https://github.com/Soulter/AstrBot)",
             "Accept": "application/json",
+            "Platform": platform_norm,
+            "Crossplay": "true",
         }
 
         try:
@@ -152,9 +161,22 @@ class WarframeMarketClient:
                 ),
             )
 
-        self._orders_cache[item_id] = (now, orders)
+        self._orders_cache[cache_key] = (now, orders)
         self._evict_cache(self._orders_cache, max_entries=self._orders_cache_max)
         return orders
+
+    async def fetch_orders_by_item_id(
+        self, item_id: str
+    ) -> list[MarketOrder] | None:
+        """Backward-compatible wrapper.
+
+        WFM v2 `/orders/item/{...}` expects item slug, not item id.
+        """
+
+        logger.warning(
+            "fetch_orders_by_item_id is deprecated for WFM v2; use fetch_orders_by_item_slug instead."
+        )
+        return []
 
     async def fetch_riven_auctions(
         self,

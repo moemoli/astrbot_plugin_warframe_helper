@@ -9,6 +9,36 @@ from ..renderers.worldstate_render import (
 )
 
 
+async def _localized_title(
+    *,
+    public_export_client: PublicExportClient,
+    name: object,
+    unique_name: object,
+    language: str = "zh",
+) -> str:
+    raw_name = str(name) if isinstance(name, str) and name else ""
+    raw_unique = str(unique_name) if isinstance(unique_name, str) and unique_name else ""
+
+    if raw_unique:
+        mapped = await public_export_client.translate_unique_name_loose(
+            raw_unique,
+            language=language,
+        )
+        if isinstance(mapped, str) and mapped.strip():
+            return mapped.strip()
+
+    if raw_name:
+        mapped = await public_export_client.translate_display_name(
+            raw_name,
+            language=language,
+        )
+        if isinstance(mapped, str) and mapped.strip():
+            return mapped.strip()
+        return raw_name
+
+    return "?"
+
+
 async def cmd_warframe(
     *,
     event: AstrMessageEvent,
@@ -36,7 +66,12 @@ async def cmd_warframe(
         energy = w.get("power") or w.get("energy")
         sprint = w.get("sprintSpeed") or w.get("sprint_speed")
 
-        name_s = str(name) if isinstance(name, str) and name else "?"
+        name_s = await _localized_title(
+            public_export_client=public_export_client,
+            name=name,
+            unique_name=uniq,
+            language="zh",
+        )
         uniq_s = str(uniq) if isinstance(uniq, str) and uniq else ""
         stat_parts: list[str] = []
         if isinstance(hp, (int, float)):
@@ -90,7 +125,12 @@ async def cmd_weapon(
         mr = w.get("masteryReq") if isinstance(w, dict) else None
         cat = w.get("category") if isinstance(w, dict) else None
 
-        name_s = str(name) if isinstance(name, str) and name else "?"
+        name_s = await _localized_title(
+            public_export_client=public_export_client,
+            name=name,
+            unique_name=uniq,
+            language="zh",
+        )
         uniq_s = str(uniq) if isinstance(uniq, str) and uniq else ""
         mr_s = f"MR{mr}" if isinstance(mr, int) else None
         cat_s = str(cat) if isinstance(cat, str) and cat else None
@@ -139,7 +179,12 @@ async def cmd_mod(
         fusion_limit = m.get("fusionLimit")
         mod_type = m.get("modType")
 
-        name_s = str(name) if isinstance(name, str) and name else "?"
+        name_s = await _localized_title(
+            public_export_client=public_export_client,
+            name=name,
+            unique_name=uniq,
+            language="zh",
+        )
         uniq_s = str(uniq) if isinstance(uniq, str) and uniq else ""
         sub_parts: list[str] = []
         if isinstance(mod_type, str) and mod_type.strip():

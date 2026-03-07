@@ -87,11 +87,14 @@ async def cmd_wm(
     if not item:
         yield event.plain_result(f"未找到物品：{query}")
         return
-    if not item.item_id:
-        yield event.plain_result("物品信息不完整（缺少 item_id），请稍后重试。")
+    if not item.slug:
+        yield event.plain_result("物品信息不完整（缺少 slug），请稍后重试。")
         return
 
-    orders = await market_client.fetch_orders_by_item_id(item.item_id)
+    orders = await market_client.fetch_orders_by_item_slug(
+        item.slug,
+        platform=platform_norm,
+    )
     if orders is None:
         yield event.plain_result("未获取到订单（接口请求失败或不可达）。")
         return
@@ -165,6 +168,7 @@ async def cmd_wm(
                 kind="/wm",
                 page=page,
                 image_path=rendered.path,
+                title="市场订单",
             )
             if ok:
                 return

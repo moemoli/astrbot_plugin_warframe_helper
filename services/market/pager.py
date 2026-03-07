@@ -90,11 +90,14 @@ async def cmd_wfp(
         platform_norm = str(state.get("platform") or "pc")
         order_type = str(state.get("order_type") or "sell")
         language = str(state.get("language") or "zh")
-        if not item or not getattr(item, "item_id", None):
+        if not item or not getattr(item, "slug", None):
             yield event.plain_result("分页信息已过期，请重新执行 /wm。")
             return
 
-        orders = await market_client.fetch_orders_by_item_id(item.item_id)
+        orders = await market_client.fetch_orders_by_item_slug(
+            item.slug,
+            platform=platform_norm,
+        )
         if orders is None:
             yield event.plain_result("未获取到订单（接口请求失败或不可达）。")
             return

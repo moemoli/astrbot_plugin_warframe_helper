@@ -431,6 +431,7 @@ async def cmd_wmr(
                 kind="/wmr",
                 page=page,
                 image_path=rendered.path,
+                title="紫卡拍卖",
             )
             if ok:
                 return

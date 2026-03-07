@@ -912,7 +912,7 @@ class WarframeHelperPlugin(Star):
             if await self._qq_dispatcher.try_send_markdown_text_for_result(
                 event=event,
                 result=res,
-                title="wm",
+                title="市场订单",
             ):
                 yield event.make_result().stop_event()
                 return
@@ -940,7 +940,7 @@ class WarframeHelperPlugin(Star):
             if await self._qq_dispatcher.try_send_markdown_text_for_result(
                 event=event,
                 result=res,
-                title="wmr",
+                title="紫卡拍卖",
             ):
                 yield event.make_result().stop_event()
                 return

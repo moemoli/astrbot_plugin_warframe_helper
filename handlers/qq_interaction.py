@@ -160,7 +160,7 @@ async def handle_qq_interaction_create(
         platform_norm = str(state.get("platform") or "pc")
         order_type = str(state.get("order_type") or "sell")
         language = str(state.get("language") or "zh")
-        if not item or not getattr(item, "item_id", None):
+        if not item or not getattr(item, "slug", None):
             await qq_pager.send_markdown_notice_interaction(
                 bot,
                 interaction,
@@ -170,7 +170,10 @@ async def handle_qq_interaction_create(
             )
             return
 
-        orders = await market_client.fetch_orders_by_item_id(item.item_id)
+        orders = await market_client.fetch_orders_by_item_slug(
+            item.slug,
+            platform=platform_norm,
+        )
         if orders is None:
             await qq_pager.send_markdown_notice_interaction(
                 bot,

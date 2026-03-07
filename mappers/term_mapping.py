@@ -19,6 +19,7 @@ from astrbot.core.utils.astrbot_path import (
 from ..http_utils import fetch_json
 
 WARFRAME_MARKET_V2_BASE_URL = "https://api.warframe.market/v2"
+WARFRAME_MARKET_REQUEST_LANGUAGE = "zh-hans"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,23 +45,35 @@ class MarketItem:
         if not lang_norm:
             return self.name
 
-        # 常见别名归一化
-        alias_map = {
-            "cn": "zh",
-            "zh-cn": "zh",
-            "zh-hans": "zh",
-            "zh-hant": "zh-tw",
-            "tw": "zh-tw",
-        }
-        lang_norm = alias_map.get(lang_norm, lang_norm)
-
         if self.i18n_names:
-            if lang_norm in self.i18n_names:
-                return self.i18n_names[lang_norm]
-            if lang_norm.replace("_", "-") in self.i18n_names:
-                return self.i18n_names[lang_norm.replace("_", "-")]
-            if lang_norm.replace("-", "_") in self.i18n_names:
-                return self.i18n_names[lang_norm.replace("-", "_")]
+            candidates: list[str] = [
+                lang_norm,
+                lang_norm.replace("_", "-"),
+                lang_norm.replace("-", "_"),
+            ]
+
+            # Common Chinese locale aliases used by different data sources.
+            locale_aliases: dict[str, tuple[str, ...]] = {
+                "cn": ("zh", "zh-hans", "zh-cn"),
+                "zh": ("zh", "zh-hans", "zh-cn"),
+                "zh-cn": ("zh-cn", "zh-hans", "zh"),
+                "zh-hans": ("zh-hans", "zh-cn", "zh"),
+                "zh-tw": ("zh-tw", "zh-hant"),
+                "zh-hant": ("zh-hant", "zh-tw"),
+                "tw": ("zh-tw", "zh-hant"),
+            }
+            for alias in locale_aliases.get(lang_norm, ()):
+                candidates.append(alias)
+                candidates.append(alias.replace("_", "-"))
+                candidates.append(alias.replace("-", "_"))
+
+            seen: set[str] = set()
+            for c in candidates:
+                if not c or c in seen:
+                    continue
+                seen.add(c)
+                if c in self.i18n_names and self.i18n_names[c]:
+                    return self.i18n_names[c]
             if "en" in self.i18n_names:
                 return self.i18n_names["en"]
         return self.name
@@ -347,8 +360,10 @@ class WarframeTermMapper:
             icon=icon,
         )
 
-    def _cache_put_item(self, item: MarketItem) -> None:
-        self._item_cache[item.slug] = {
+    def _cache_put_item(
+        self, item: MarketItem, *, request_language: str | None = None
+    ) -> None:
+        rec: dict[str, Any] = {
             "ts": time.time(),
             "item_id": item.item_id,
             "name": item.name,
@@ -358,6 +373,9 @@ class WarframeTermMapper:
             "thumb": item.thumb,
             "icon": item.icon,
         }
+        if isinstance(request_language, str) and request_language.strip():
+            rec["request_language"] = request_language.strip().lower()
+        self._item_cache[item.slug] = rec
         self._save_item_cache()
 
     def _parse_prime_and_set(self, raw: str) -> tuple[str, bool, bool]:
@@ -490,15 +508,27 @@ class WarframeTermMapper:
         return dedup
 
     async def _fetch_item_v2(self, slug: str) -> MarketItem | None:
+        cache_rec = self._item_cache.get(slug)
         cached = self._cache_get_item(slug)
-        # 兼容旧缓存：如果 cached 没有 item_id，则强制重新拉取
-        if cached and cached.item_id:
+        # 兼容旧缓存：如果 cached 没有 item_id，则强制重新拉取。
+        # 另外旧缓存未记录 request_language 时，刷新一次以启用中文请求头。
+        cached_request_language = None
+        if isinstance(cache_rec, dict):
+            raw_lang = cache_rec.get("request_language")
+            if isinstance(raw_lang, str):
+                cached_request_language = raw_lang.strip().lower()
+        if (
+            cached
+            and cached.item_id
+            and cached_request_language == WARFRAME_MARKET_REQUEST_LANGUAGE
+        ):
             return cached
 
-        url = f"{WARFRAME_MARKET_V2_BASE_URL}/items/{slug}"
+        url = f"{WARFRAME_MARKET_V2_BASE_URL}/item/{slug}"
         headers = {
             "User-Agent": "AstrBot/warframe_helper (+https://github.com/Soulter/AstrBot)",
             "Accept": "application/json",
+            "Language": WARFRAME_MARKET_REQUEST_LANGUAGE,
         }
 
         payload = await fetch_json(
@@ -561,7 +591,10 @@ class WarframeTermMapper:
                 thumb=thumbs.get("en"),
                 icon=icons.get("en"),
             )
-            self._cache_put_item(item)
+            self._cache_put_item(
+                item,
+                request_language=WARFRAME_MARKET_REQUEST_LANGUAGE,
+            )
             return item
         except Exception:
             return None
