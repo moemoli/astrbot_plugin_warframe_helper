@@ -9,6 +9,7 @@ from ...clients.market_client import WarframeMarketClient
 from ...components.event_ttl_cache import EventScopedTTLCache
 from ...components.qq_official_webhook import QQOfficialWebhookPager
 from ...constants import MARKET_PLATFORM_ALIASES, WM_BUY_ALIASES, WM_SELL_ALIASES
+from ...constants import market_status_to_cn
 from ...helpers import split_tokens
 from ...mappers.term_mapping import WarframeTermMapper
 from .pager_common import filter_sort_wm_orders, render_wm_page_image
@@ -188,7 +189,7 @@ async def cmd_wm(
         f"{item.get_localized_name(language)}（{platform_norm}）{action_cn} 低->高 前{len(top)}："
     ]
     for idx, o in enumerate(top, start=1):
-        status = o.status or "unknown"
+        status = market_status_to_cn(o.status)
         name = o.ingame_name or "unknown"
         lines.append(f"{idx}. {o.platinum}p  {status}  {name}")
     yield event.plain_result("\n".join(lines))

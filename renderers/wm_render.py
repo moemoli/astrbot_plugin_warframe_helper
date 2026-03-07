@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 
 from ..clients.market_client import MarketOrder
+from ..constants import market_status_to_cn, normalize_market_status
 from ..http_utils import fetch_bytes
 from ..mappers.term_mapping import MarketItem
 from .html_snapshot import image_bytes_to_data_uri, render_html_to_png_file, svg_text_to_data_uri
@@ -30,7 +31,7 @@ async def _download_bytes(url: str, *, timeout_sec: float = 10.0) -> bytes | Non
 
 
 def _status_class(status: str | None) -> str:
-    s = (status or "").strip().lower()
+    s = normalize_market_status(status)
     if s in {"ingame", "in_game", "in-game", "in game"}:
         return "ingame"
     if s == "online":
@@ -116,14 +117,14 @@ async def render_wm_orders_image_to_file(
     rows: list[dict[str, str]] = []
     for order, avatar_bytes in zip(selected, avatar_bytes_list, strict=False):
         avatar_uri = image_bytes_to_data_uri(avatar_bytes) or placeholder
-        status = (order.status or "offline").strip().lower() or "offline"
+        status = normalize_market_status(order.status)
         qty = int(order.quantity)
 
         rows.append(
             {
                 "avatar": avatar_uri,
                 "name": (order.ingame_name or "unknown").strip() or "unknown",
-                "status_text": status,
+                "status_text": market_status_to_cn(status),
                 "status_class": _status_class(status),
                 "price_text": f"{int(order.platinum)}p",
                 "qty_text": f"x{qty}" if qty > 1 else "",

@@ -99,3 +99,32 @@ RIVEN_STAT_CN: dict[str, str] = {
     "damage_vs_infested": "对Infested伤害",
     "damage_vs_sentient": "对Sentient伤害",
 }
+
+
+MARKET_STATUS_CN: dict[str, str] = {
+    "ingame": "游戏中",
+    "online": "在线",
+    "offline": "离线",
+    "away": "离开",
+    "invisible": "隐身",
+    "unknown": "未知",
+}
+
+
+def normalize_market_status(status: str | None) -> str:
+    s = (status or "").strip().lower()
+    if s in {"ingame", "in_game", "in-game", "in game"}:
+        return "ingame"
+    if s in {"online", "off"}:
+        return "online"
+    if s in {"offline", "invisible_offline"}:
+        return "offline"
+    if s in {"away", "afk"}:
+        return "away"
+    if s in {"invisible", "hidden"}:
+        return "invisible"
+    return "unknown"
+
+
+def market_status_to_cn(status: str | None) -> str:
+    return MARKET_STATUS_CN.get(normalize_market_status(status), "未知")

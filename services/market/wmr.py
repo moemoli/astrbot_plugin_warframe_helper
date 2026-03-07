@@ -10,6 +10,7 @@ from ...clients.market_client import WarframeMarketClient
 from ...components.event_ttl_cache import EventScopedTTLCache
 from ...components.qq_official_webhook import QQOfficialWebhookPager
 from ...constants import MARKET_PLATFORM_ALIASES, RIVEN_STAT_ALIASES
+from ...constants import market_status_to_cn
 from ...helpers import split_tokens, uniq_lower
 from ...mappers.riven_mapping import WarframeRivenWeaponMapper
 from ...mappers.riven_stats_mapping import WarframeRivenStatMapper
@@ -451,7 +452,7 @@ async def cmd_wmr(
     lines = [f"紫卡 {fallback_name}（{platform_norm}）{summary} 前{len(top)}："]
     for idx, a in enumerate(top, start=1):
         name = a.owner_name or "unknown"
-        status = a.owner_status or "unknown"
+        status = market_status_to_cn(a.owner_status)
         pol = a.polarity or "?"
         mr = a.mastery_level if a.mastery_level is not None else "?"
         rr = a.re_rolls if a.re_rolls is not None else "?"

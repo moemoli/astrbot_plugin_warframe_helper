@@ -6,6 +6,7 @@ from astrbot.api.event import AstrMessageEvent
 from ...clients.market_client import WarframeMarketClient
 from ...components.event_ttl_cache import EventScopedTTLCache
 from ...components.qq_official_webhook import QQOfficialWebhookPager
+from ...constants import market_status_to_cn
 from ...helpers import uniq_lower
 from .pager_common import (
     filter_sort_wm_orders,
@@ -178,7 +179,7 @@ async def cmd_wfp(
             f"{item.get_localized_name(language)}（{platform_norm}）{action_cn} 第{new_page}页："
         ]
         for idx, o in enumerate(top, start=1):
-            status = o.status or "unknown"
+            status = market_status_to_cn(o.status)
             name = o.ingame_name or "unknown"
             lines.append(f"{idx}. {o.platinum}p  {status}  {name}")
         yield event.plain_result("\n".join(lines))
@@ -310,7 +311,7 @@ async def cmd_wfp(
         lines = [f"紫卡 {fallback_name}（{platform_norm}）{summary} 第{new_page}页："]
         for idx, a in enumerate(top, start=1):
             name = a.owner_name or "unknown"
-            status = a.owner_status or "unknown"
+            status = market_status_to_cn(a.owner_status)
             pol = a.polarity or "?"
             mr = a.mastery_level if a.mastery_level is not None else "?"
             rr = a.re_rolls if a.re_rolls is not None else "?"

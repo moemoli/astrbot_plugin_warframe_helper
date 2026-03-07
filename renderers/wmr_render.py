@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from ..clients.market_client import RivenAttribute, RivenAuction
 from ..constants import RIVEN_STAT_CN
+from ..constants import market_status_to_cn, normalize_market_status
 from ..http_utils import fetch_bytes
 from ..mappers.riven_mapping import RivenWeapon
 from .html_snapshot import image_bytes_to_data_uri, render_html_to_png_file, svg_text_to_data_uri
@@ -55,7 +56,7 @@ async def _download_bytes(url: str, *, timeout_sec: float = 10.0) -> bytes | Non
 
 
 def _status_class(status: str | None) -> str:
-    s = (status or "").strip().lower()
+    s = normalize_market_status(status)
     if s in {"ingame", "in_game", "in-game", "in game"}:
         return "ingame"
     if s == "online":
@@ -173,7 +174,7 @@ async def render_wmr_auctions_image_to_file(
     rows: list[dict[str, str]] = []
     for auction, avatar_bytes in zip(selected, avatar_bytes_list, strict=False):
         owner_name = (auction.owner_name or "unknown").strip() or "unknown"
-        status = (auction.owner_status or "offline").strip().lower() or "offline"
+        status = normalize_market_status(auction.owner_status)
 
         pos = [x for x in auction.attributes if x.positive]
         neg = [x for x in auction.attributes if not x.positive]
@@ -182,7 +183,7 @@ async def render_wmr_auctions_image_to_file(
             {
                 "avatar": image_bytes_to_data_uri(avatar_bytes) or placeholder,
                 "name": owner_name,
-                "status_text": status,
+                "status_text": market_status_to_cn(status),
                 "status_class": _status_class(status),
                 "mr_text": str(int(auction.mastery_level or 0)),
                 "polarity_text": _fmt_polarity(auction.polarity),
