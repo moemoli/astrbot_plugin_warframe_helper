@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
@@ -23,6 +24,13 @@ OFFICIAL_WORLDSTATE_URLS: list[str] = [
 ]
 
 
+WORLDSTATE_PROXY_URLS: list[str] = [
+    # Mirror wrappers for regions where official domains are unstable/inaccessible.
+    "https://r.jina.ai/http://content.warframe.com/dynamic/worldState.php",
+    "https://r.jina.ai/http://api.warframe.com/cdn/worldState.php",
+]
+
+
 WARFRAMESTAT_API_BASES: list[str] = [
     "https://api.warframestat.us",
 ]
@@ -34,11 +42,21 @@ WARFRAMESTAT_PROXY_BASES: list[str] = [
 ]
 
 
+def _append_platform_query(url: str, platform_norm: str) -> str:
+    if not platform_norm or platform_norm == "pc":
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}platform={platform_norm}"
+
+
 def _worldstate_urls(platform: Platform) -> list[str]:
     platform_norm = (platform or "pc").strip().lower()
-    if platform_norm and platform_norm != "pc":
-        return [f"{u}?platform={platform_norm}" for u in OFFICIAL_WORLDSTATE_URLS]
-    return list(OFFICIAL_WORLDSTATE_URLS)
+    urls: list[str] = []
+    for u in [*OFFICIAL_WORLDSTATE_URLS, *WORLDSTATE_PROXY_URLS]:
+        uu = _append_platform_query(u, platform_norm)
+        if uu not in urls:
+            urls.append(uu)
+    return urls
 
 
 def _normalize_base_urls(urls: list[str] | None) -> list[str]:
@@ -582,15 +600,27 @@ class WarframeWorldstateClient:
     def _cache_put(self, key: str, payload: Any) -> None:
         self._cache[key] = (time.time(), payload)
 
-    async def _fetch_json_resilient(self, urls: list[str]) -> Any | None:
-        data = await fetch_json(urls, timeout_sec=self._http_timeout_sec)
-        if data is not None:
-            return data
+    async def _fetch_json_resilient(
+        self, urls: list[str], *, timeout_sec: float | None = None
+    ) -> Any | None:
+        effective_timeout = (
+            float(timeout_sec)
+            if isinstance(timeout_sec, (int, float)) and float(timeout_sec) > 0
+            else self._http_timeout_sec
+        )
 
-        raw = await fetch_bytes(urls, timeout_sec=self._http_timeout_sec)
+        # Single network pass: decode strict JSON first, then try loose extraction.
+        # This avoids duplicated URL retries when upstream returns non-standard JSON text.
+        raw = await fetch_bytes(urls, timeout_sec=effective_timeout)
         if raw is None:
             return None
         text = raw.decode("utf-8", "replace")
+        try:
+            import json
+
+            return json.loads(text)
+        except Exception:
+            pass
         return _extract_json_from_text(text)
 
     def reset_public_export_cache(
@@ -610,7 +640,13 @@ class WarframeWorldstateClient:
             "disk_cleared": bool(pe_result.get("disk_cleared", False)),
         }
 
-    async def _get_worldstate(self, *, platform: Platform, language: str) -> Any | None:
+    async def _get_worldstate(
+        self,
+        *,
+        platform: Platform,
+        language: str,
+        timeout_sec: float | None = None,
+    ) -> Any | None:
         platform_norm: Platform = platform
         lang = (language or "zh").strip().lower() or "zh"
 
@@ -619,10 +655,20 @@ class WarframeWorldstateClient:
         if cached is not None:
             return cached
 
-        data = await fetch_json(
-            _worldstate_urls(platform_norm), timeout_sec=self._http_timeout_sec
+        effective_timeout = (
+            float(timeout_sec)
+            if isinstance(timeout_sec, (int, float)) and float(timeout_sec) > 0
+            else self._http_timeout_sec
+        )
+
+        data = await self._fetch_json_resilient(
+            _worldstate_urls(platform_norm), timeout_sec=effective_timeout
         )
         if data is None:
+            logger.warning(
+                f"worldstate fetch failed for platform={platform_norm} "
+                f"timeout={effective_timeout:.1f}s urls={_worldstate_urls(platform_norm)[:4]}"
+            )
             return None
 
         self._cache_put(cache_key, data)
@@ -1242,23 +1288,39 @@ class WarframeWorldstateClient:
     async def fetch_nightwave(
         self, *, platform: Platform = "pc", language: str = "zh"
     ) -> NightwaveInfo | None:
-        ws = await self._get_worldstate(platform=platform, language=language)
-        if not isinstance(ws, dict):
-            return None
-        si = ws.get("SeasonInfo")
-        if not isinstance(si, dict):
-            return None
+        season: int | None = None
+        phase: int | None = None
+        expiry: datetime | None = None
 
-        season = si.get("Season") if isinstance(si.get("Season"), int) else None
-        phase = si.get("Phase") if isinstance(si.get("Phase"), int) else None
-        expiry = _parse_ws_date(si.get("Expiry"))
-
-        mapping = await self._public_export.get_nightwave_challenge_map(
-            language=language
+        ws = await self._get_worldstate(
+            platform=platform,
+            language=language,
+            timeout_sec=min(self._http_timeout_sec, 3.0),
         )
+
+        si: dict[str, Any] | None = None
+        if isinstance(ws, dict):
+            season_info = ws.get("SeasonInfo")
+            if isinstance(season_info, dict):
+                si = season_info
+
+        if isinstance(si, dict):
+            season = si.get("Season") if isinstance(si.get("Season"), int) else None
+            phase = si.get("Phase") if isinstance(si.get("Phase"), int) else None
+            expiry = _parse_ws_date(si.get("Expiry"))
+
+        mapping: dict[str, tuple[str, int | None, str | None]] = {}
+        try:
+            mapping = await asyncio.wait_for(
+                self._public_export.get_nightwave_challenge_map(language=language),
+                timeout=min(self._http_timeout_sec, 4.0),
+            )
+        except Exception as exc:
+            logger.info(f"nightwave challenge map unavailable: {exc!s}")
+
         challenges: list[NightwaveChallenge] = []
-        active_raw = si.get("ActiveChallenges")
-        if not isinstance(active_raw, list):
+        active_raw = si.get("ActiveChallenges") if isinstance(si, dict) else None
+        if not isinstance(active_raw, list) and isinstance(si, dict):
             active_raw = si.get("activeChallenges")
         if isinstance(active_raw, list):
             for c in active_raw:
@@ -1287,11 +1349,11 @@ class WarframeWorldstateClient:
                         challenge=c,
                     )
                 else:
-                    loose = await self._public_export.translate_unique_name_loose(
-                        uniq, language=language
-                    )
-                    if isinstance(loose, str) and loose.strip():
-                        title = loose.strip()
+                    # Degraded path: avoid expensive per-item localization network calls.
+                    # Keep command latency bounded under poor connectivity.
+                    raw_title = c.get("Title") if isinstance(c.get("Title"), str) else None
+                    if isinstance(raw_title, str) and raw_title.strip():
+                        title = raw_title.strip()
                     raw_desc = (
                         c.get("Description")
                         if isinstance(c.get("Description"), str)
@@ -1321,8 +1383,10 @@ class WarframeWorldstateClient:
                 )
 
         if not challenges:
+            fallback_urls = self._warframestat_urls(platform, "nightwave")[:2]
             fallback = await self._fetch_json_resilient(
-                self._warframestat_urls(platform, "nightwave")
+                fallback_urls,
+                timeout_sec=min(self._http_timeout_sec, 2.5),
             )
             if isinstance(fallback, dict):
                 fallback_season = (

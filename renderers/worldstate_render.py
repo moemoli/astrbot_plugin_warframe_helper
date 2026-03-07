@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
-from .html_snapshot import render_html_to_png_file
+from astrbot.api import logger
+
+from .html_snapshot import has_render_browser_ws_endpoint, render_html_to_png_file
 from .template_loader import load_html_template
 
 
@@ -84,6 +87,7 @@ async def render_worldstate_rows_image_to_file(
     rows: list[WorldstateRow],
     reward_rows: list[WorldstateRow] | None = None,
     accent: tuple[int, int, int, int] = (79, 70, 229, 255),
+    render_timeout_sec: float = 6.0,
 ) -> RenderedImage | None:
     if not rows and not reward_rows:
         return None
@@ -96,12 +100,28 @@ async def render_worldstate_rows_image_to_file(
         accent=accent,
     )
 
-    path = await render_html_to_png_file(
-        html=html,
-        width=980,
-        prefix="wf_worldstate",
-        min_height=640,
-    )
+    timeout_sec = max(1.0, float(render_timeout_sec))
+    # Remote browser connect + first-page warmup can be slower than local fallback.
+    # Give it a larger budget to avoid unnecessary text-only degradation.
+    if has_render_browser_ws_endpoint():
+        timeout_sec = max(timeout_sec, 15.0)
+
+    try:
+        path = await asyncio.wait_for(
+            render_html_to_png_file(
+                html=html,
+                width=980,
+                prefix="wf_worldstate",
+                min_height=640,
+            ),
+            timeout=timeout_sec,
+        )
+    except TimeoutError:
+        logger.warning(
+            f"worldstate html render timeout after {timeout_sec:.1f}s"
+        )
+        return None
+
     if not path:
         return None
 

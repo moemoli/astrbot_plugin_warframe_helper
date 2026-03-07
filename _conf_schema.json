@@ -80,6 +80,12 @@
                 "default": "",
                 "description": "公网访问地址 (Base URL)",
                 "hint": "用于在 QQ 官方 Webhook 平台发送‘单条 Markdown(含图)+翻页按钮’消息时，把本地渲染图片转换为可公网访问的 URL（会拼成 {base}/api/file/<token>）。需要在 QQ 后台将该域名加入消息 URL 白名单。"
+            },
+            "debug_logging": {
+                "type": "bool",
+                "default": false,
+                "description": "启用 QQ 官方 Bot 详细调试日志",
+                "hint": "开启后会输出消息接收、路由命中/跳过原因、交互按钮处理等详细日志（日志前缀 [WFHelperDebug]）。用于排查‘指令无反应’问题，建议仅在排障时开启。"
             }
         }
     }

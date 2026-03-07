@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Callable, cast
@@ -36,6 +37,12 @@ from .services.market.wmr import cmd_wmr
 from .services.subscriptions import SubscriptionService
 
 QQ_OFFICIAL_WEBHOOK_PAGER_TEMPLATE_ID_DEFAULT = ""
+_DEBUG_LOGGING_ENABLED = False
+
+
+def set_debug_logging_enabled(enabled: bool) -> None:
+    global _DEBUG_LOGGING_ENABLED
+    _DEBUG_LOGGING_ENABLED = bool(enabled)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,11 +51,32 @@ class QQWebhookConfig:
     keyboard_template_id: str
     markdown_template_id: str
     public_base_url: str
+    debug_logging: bool
 
 
 def _safe_disable_llm(event: AstrMessageEvent, *, reason: str) -> None:
     if reason.startswith("/"):
         set_current_render_command(reason)
+
+    if _DEBUG_LOGGING_ENABLED:
+        try:
+            text = (event.get_message_str() or "").strip()
+        except Exception:
+            text = ""
+        logger.info(
+            " | ".join(
+                [
+                    "[WFHelperDebug] command_dispatch",
+                    f"reason={reason}",
+                    f"sender={event.get_sender_id()}",
+                    f"session={event.session_id}",
+                    f"wake={getattr(event, 'is_wake', False)}",
+                    f"wake_cmd={getattr(event, 'is_at_or_wake_command', False)}",
+                    f"text={text[:180]}",
+                ]
+            )
+        )
+
     try:
         event.should_call_llm(True)
     except Exception as exc:
@@ -85,6 +113,7 @@ def _parse_qq_webhook_config(config: dict | None) -> QQWebhookConfig:
     keyboard_tpl = ""
     markdown_tpl = ""
     public_base_url = ""
+    debug_logging = False
     if isinstance(sub_config, dict):
         enable_md = bool(sub_config.get("webhook_enable_markdown_reply"))
         keyboard_tpl = str(
@@ -92,12 +121,14 @@ def _parse_qq_webhook_config(config: dict | None) -> QQWebhookConfig:
         ).strip()
         markdown_tpl = str(sub_config.get("webhook_markdown_template_id") or "").strip()
         public_base_url = str(sub_config.get("webhook_public_base_url") or "").strip()
+        debug_logging = bool(sub_config.get("debug_logging"))
 
     return QQWebhookConfig(
         enable_markdown=enable_md,
         keyboard_template_id=keyboard_tpl,
         markdown_template_id=markdown_tpl,
         public_base_url=public_base_url,
+        debug_logging=debug_logging,
     )
 
 
@@ -232,7 +263,7 @@ class QQResultDispatcher:
         )
 
 
-@register("warframe_helper", "moemoli", "Warframe 助手", "v0.0.4")
+@register("warframe_helper", "moemoli", "Warframe 助手", "v0.1.0")
 class WarframeHelperPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context, config)
@@ -267,6 +298,8 @@ class WarframeHelperPlugin(Star):
         self._pager_cache = EventScopedTTLCache(ttl_sec=10 * 60)
 
         qq_cfg = _parse_qq_webhook_config(self.config)
+        self._debug_logging_enabled = bool(qq_cfg.debug_logging)
+        set_debug_logging_enabled(self._debug_logging_enabled)
         # QQ official webhook keyboard template id (message buttons).
         # Note: QQ button templates do NOT support variables.
         qq_tpl = (
@@ -283,6 +316,15 @@ class WarframeHelperPlugin(Star):
         self._qq_dispatcher = QQResultDispatcher(self._qq_pager)
 
         self._qq_pager.set_interaction_handler(self._on_qq_interaction_create)
+
+        self._debug_log(
+            "plugin_initialized",
+            enable_no_prefix=self._enable_no_prefix_commands,
+            qq_markdown_enabled=qq_cfg.enable_markdown,
+            qq_keyboard_template=bool(qq_tpl),
+            qq_markdown_template=bool(qq_cfg.markdown_template_id),
+            qq_public_base_url=bool(qq_cfg.public_base_url),
+        )
 
         # Fissure subscription (proactive notifications)
         self._subscriptions = SubscriptionService(
@@ -305,15 +347,62 @@ class WarframeHelperPlugin(Star):
         await self._subscriptions.stop()
 
     async def _on_qq_interaction_create(self, bot: object, interaction: object) -> None:
-        await handle_qq_interaction_create(
-            bot=bot,
-            interaction=interaction,
-            qq_pager=self._qq_pager,
-            pager_cache=self._pager_cache,
-            wm_pick_cache=self._wm_pick_cache,
-            market_client=self.market_client,
+        self._debug_log(
+            "qq_interaction_received",
+            interaction_type=type(interaction).__name__,
+            interaction_id=getattr(interaction, "id", None),
         )
+        try:
+            await handle_qq_interaction_create(
+                bot=bot,
+                interaction=interaction,
+                qq_pager=self._qq_pager,
+                pager_cache=self._pager_cache,
+                wm_pick_cache=self._wm_pick_cache,
+                market_client=self.market_client,
+            )
+            self._debug_log("qq_interaction_handled")
+        except Exception as exc:
+            logger.warning(f"QQ interaction dispatch failed: {exc!s}")
+            self._debug_log("qq_interaction_failed", error=str(exc))
         return
+
+    def _debug_log(
+        self,
+        action: str,
+        *,
+        event: AstrMessageEvent | None = None,
+        **fields: object,
+    ) -> None:
+        if not getattr(self, "_debug_logging_enabled", False):
+            return
+
+        def _clip(value: object, max_len: int = 180) -> str:
+            s = str(value)
+            if len(s) <= max_len:
+                return s
+            return s[: max_len - 3] + "..."
+
+        parts = [f"[WFHelperDebug] {action}"]
+        if event is not None:
+            text = (event.get_message_str() or "").strip()
+            raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+            parts.extend(
+                [
+                    f"sender={getattr(event, 'get_sender_id', lambda: '')()}",
+                    f"session={getattr(event, 'session_id', '')}",
+                    f"private={event.is_private_chat()}",
+                    f"wake={getattr(event, 'is_wake', False)}",
+                    f"wake_cmd={getattr(event, 'is_at_or_wake_command', False)}",
+                    f"text={_clip(text)}",
+                    f"raw_type={type(raw).__name__}",
+                ]
+            )
+
+        for key, value in fields.items():
+            parts.append(f"{key}={_clip(value)}")
+
+        logger.info(" | ".join(parts))
 
     async def _try_send_qq_markdown_for_result(
         self,
@@ -427,16 +516,26 @@ class WarframeHelperPlugin(Star):
     @filter.regex(r"^\S(?:[\s\S]*)$")
     async def no_prefix_command_router(self, event: AstrMessageEvent):
         if not self._enable_no_prefix_commands:
+            self._debug_log("no_prefix_skip", event=event, reason="feature_disabled")
+            return
+
+        # Messages that already entered wake/command flow (e.g. "/指令", @bot)
+        # are handled by regular command filters and must not be dispatched again.
+        if getattr(event, "is_at_or_wake_command", False):
+            self._debug_log("no_prefix_skip", event=event, reason="wake_or_command_flow")
             return
 
         text = (event.get_message_str() or "").strip()
         if not text or text.startswith("/"):
+            self._debug_log("no_prefix_skip", event=event, reason="empty_or_slash")
             return
 
         lowered = text.lower()
         if lowered in {"上一页", "下一页", "prev", "previous", "next"}:
+            self._debug_log("no_prefix_skip", event=event, reason="pager_keyword")
             return
         if lowered.isdigit():
+            self._debug_log("no_prefix_skip", event=event, reason="numeric_reply")
             return
 
         token, _, rest = text.partition(" ")
@@ -445,8 +544,11 @@ class WarframeHelperPlugin(Star):
 
         handler = self._no_prefix_handler_map().get(command)
         if handler is None:
+            self._debug_log("no_prefix_miss", event=event, command=command)
             return
         handler_fn = cast(Callable[..., Any], handler)
+
+        self._debug_log("no_prefix_hit", event=event, command=command, args=raw_args)
 
         _safe_disable_llm(event, reason=f"no_prefix:{command}")
 
@@ -454,6 +556,7 @@ class WarframeHelperPlugin(Star):
             async for res in handler_fn(event, raw_args):
                 yield res
         except TypeError:
+            self._debug_log("no_prefix_retry_without_args", event=event, command=command)
             async for res in handler_fn(event):
                 yield res
 
@@ -879,12 +982,18 @@ class WarframeHelperPlugin(Star):
         """
 
         if not self._qq_pager.keyboard_enabled_for(event):
+            self._debug_log(
+                "qq_button_skip",
+                event=event,
+                reason="keyboard_not_enabled_for_event",
+            )
             return
 
         _safe_disable_llm(event, reason="qq_official_webhook_button_page")
 
         text = (event.get_message_str() or "").strip().lower()
         direction = "prev" if text in {"上一页", "prev", "previous"} else "next"
+        self._debug_log("qq_button_route", event=event, direction=direction)
 
         async for res in cmd_wfp(
             event=event,
@@ -1089,11 +1198,22 @@ class WarframeHelperPlugin(Star):
         """查询电波（Nightwave）。"""
 
         _safe_disable_llm(event, reason="/电波")
-        result = await worldstate_commands.cmd_nightwave(
-            event=event,
-            raw_args=str(args),
-            worldstate_client=self.worldstate_client,
-        )
+        try:
+            result = await asyncio.wait_for(
+                worldstate_commands.cmd_nightwave(
+                    event=event,
+                    raw_args=str(args),
+                    worldstate_client=self.worldstate_client,
+                ),
+                timeout=25,
+            )
+        except TimeoutError:
+            self._debug_log("nightwave_timeout", event=event, timeout_sec=25)
+            yield event.plain_result(
+                "电波查询超时（25s）。请稍后重试，或检查网络/代理配置。"
+            )
+            return
+
         if await self._try_send_qq_markdown_for_result(
             event=event,
             result=result,
@@ -1102,6 +1222,23 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
+
+        # QQ official webhook: if markdown image send failed, avoid silent failure.
+        if self._qq_pager.enabled_for(event):
+            image_path = self._qq_dispatcher.extract_image_path_from_result(result)
+            if image_path:
+                self._debug_log(
+                    "qq_markdown_image_failed_fallback_text",
+                    event=event,
+                    command="/电波",
+                )
+                yield event.plain_result(
+                    "电波结果已生成，但 QQ 官方 Markdown 图片发送失败。"
+                    "请检查 qq_official.webhook_markdown_template_id 与 "
+                    "qq_official.webhook_public_base_url 配置。"
+                )
+                return
+
         yield result
 
     @filter.command("平原")

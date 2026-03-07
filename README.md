@@ -119,7 +119,7 @@
 ```bash
 sudo docker run -d --name browserless \
   --restart unless-stopped \
-  -p 3000:3000 \
+  -p 3100:3000 \
   -e TOKEN=astrbot-token \
   -e MAX_CONCURRENT_SESSIONS=5 \
   -e CONNECTION_TIMEOUT=120000 \
@@ -132,7 +132,7 @@ sudo docker run -d --name browserless \
 
 ```json
 {
-  "render_browser_ws_endpoint": "ws://宿主机内网ip:3000?token=astrbot-token"
+  "render_browser_ws_endpoint": "ws://宿主机内网ip:3100?token=astrbot-token"
 }
 ```
 
@@ -140,14 +140,14 @@ sudo docker run -d --name browserless \
 
 ```json
 {
-  "render_browser_ws_endpoint": "ws://browserless:3000?token=astrbot-token"
+  "render_browser_ws_endpoint": "ws://browserless:3100?token=astrbot-token"
 }
 ```
 
 ### 3) 服务可用性检查
 
 ```bash
-curl -s http://127.0.0.1:3000/json/version
+curl -s http://127.0.0.1:3100/json/version
 ```
 
 返回浏览器版本 JSON 即表示远程服务可用。

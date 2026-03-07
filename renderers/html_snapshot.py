@@ -35,6 +35,9 @@ def _env_int(name: str, default: int) -> int:
 
 
 _HTML_RENDER_WORKERS = max(1, min(4, _env_int("WF_HTML_RENDER_WORKERS", 2)))
+_HTML_RENDER_CONNECT_TIMEOUT_SEC = max(1, _env_int("WF_HTML_RENDER_CONNECT_TIMEOUT", 4))
+_HTML_RENDER_LAUNCH_TIMEOUT_SEC = max(2, _env_int("WF_HTML_RENDER_LAUNCH_TIMEOUT", 8))
+_HTML_RENDER_PAGE_TIMEOUT_SEC = max(2, _env_int("WF_HTML_RENDER_PAGE_TIMEOUT", 6))
 _HTML_RENDER_EXECUTOR = ThreadPoolExecutor(
     max_workers=_HTML_RENDER_WORKERS,
     thread_name_prefix="wf-html-render",
@@ -44,6 +47,9 @@ _CHROMIUM_PREPARED = False
 _RENDER_BROWSER_WS_ENDPOINT = ""
 _EMPTY_REMOTE_LOCAL_CHAIN_FAILED = False
 _EMPTY_REMOTE_LOCAL_CHAIN_LOCK = threading.Lock()
+_REMOTE_BROWSER_POOL_LOCK = asyncio.Lock()
+_REMOTE_BROWSER_POOLED: Any | None = None
+_REMOTE_BROWSER_POOLED_ENDPOINT = ""
 
 
 def set_render_browser_ws_endpoint(endpoint: str | None) -> None:
@@ -53,6 +59,150 @@ def set_render_browser_ws_endpoint(endpoint: str | None) -> None:
         # With explicit remote browser configured, clear empty-endpoint fail flag.
         with _EMPTY_REMOTE_LOCAL_CHAIN_LOCK:
             _EMPTY_REMOTE_LOCAL_CHAIN_FAILED = False
+
+
+def has_render_browser_ws_endpoint() -> bool:
+    return bool(str(_RENDER_BROWSER_WS_ENDPOINT or "").strip())
+
+
+async def _invalidate_pooled_remote_browser(*, reason: str) -> None:
+    global _REMOTE_BROWSER_POOLED, _REMOTE_BROWSER_POOLED_ENDPOINT
+    if _REMOTE_BROWSER_POOLED is None:
+        return
+    browser = _REMOTE_BROWSER_POOLED
+    _REMOTE_BROWSER_POOLED = None
+    _REMOTE_BROWSER_POOLED_ENDPOINT = ""
+    try:
+        await browser.disconnect()
+    except Exception:
+        pass
+    logger.warning(f"Remote pooled browser invalidated: {reason}")
+
+
+async def _get_pooled_remote_browser() -> Any | None:
+    global _REMOTE_BROWSER_POOLED, _REMOTE_BROWSER_POOLED_ENDPOINT
+
+    endpoint = str(_RENDER_BROWSER_WS_ENDPOINT or "").strip()
+    if not endpoint:
+        return None
+
+    try:
+        from pyppeteer import connect
+    except Exception as exc:
+        logger.warning(f"pyppeteer import failed for remote pooled browser: {exc!s}")
+        return None
+
+    async with _REMOTE_BROWSER_POOL_LOCK:
+        if _REMOTE_BROWSER_POOLED is not None and _REMOTE_BROWSER_POOLED_ENDPOINT != endpoint:
+            await _invalidate_pooled_remote_browser(reason="endpoint_changed")
+
+        if _REMOTE_BROWSER_POOLED is not None:
+            try:
+                await asyncio.wait_for(
+                    _REMOTE_BROWSER_POOLED.version(),
+                    timeout=min(2.0, float(_HTML_RENDER_CONNECT_TIMEOUT_SEC)),
+                )
+                return _REMOTE_BROWSER_POOLED
+            except Exception:
+                await _invalidate_pooled_remote_browser(reason="health_check_failed")
+
+        try:
+            browser = await asyncio.wait_for(
+                connect(browserWSEndpoint=endpoint),
+                timeout=float(_HTML_RENDER_CONNECT_TIMEOUT_SEC),
+            )
+            _REMOTE_BROWSER_POOLED = browser
+            _REMOTE_BROWSER_POOLED_ENDPOINT = endpoint
+            logger.warning(f"Remote pooled browser connected: {endpoint}")
+            return browser
+        except Exception as exc:
+            logger.warning(f"Remote pooled browser connect failed for {endpoint}: {exc!s}")
+            return None
+
+
+async def _render_html_to_png_with_remote_pool(
+    *,
+    html: str,
+    width: int,
+    prefix: str,
+    min_height: int,
+) -> str | None:
+    temp_dir = Path(get_astrbot_temp_path())
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    out_path = temp_dir / f"{prefix}_{uuid.uuid4().hex}.png"
+
+    browser = await _get_pooled_remote_browser()
+    if browser is None:
+        return None
+
+    page = None
+    try:
+        page = await asyncio.wait_for(
+            browser.newPage(),
+            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
+        )
+        await page.setViewport(
+            {
+                "width": max(420, int(width)),
+                "height": max(320, int(min_height)),
+                "deviceScaleFactor": 1.5,
+            }
+        )
+        await asyncio.wait_for(
+            page.setContent(html),
+            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
+        )
+
+        content_height = await asyncio.wait_for(
+            page.evaluate(
+                """
+                () => {
+                  const body = document.body;
+                  const doc = document.documentElement;
+                  return Math.ceil(Math.max(
+                    body ? body.scrollHeight : 0,
+                    body ? body.offsetHeight : 0,
+                    doc ? doc.clientHeight : 0,
+                    doc ? doc.scrollHeight : 0,
+                    doc ? doc.offsetHeight : 0,
+                  ));
+                }
+                """
+            ),
+            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
+        )
+
+        await page.setViewport(
+            {
+                "width": max(420, int(width)),
+                "height": max(320, int(content_height or min_height)),
+                "deviceScaleFactor": 1.5,
+            }
+        )
+
+        await asyncio.wait_for(
+            page.screenshot(
+                {
+                    "path": str(out_path),
+                    "fullPage": True,
+                    "type": "png",
+                }
+            ),
+            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
+        )
+        return str(out_path)
+    except Exception as exc:
+        msg = str(exc).lower()
+        if any(x in msg for x in ["target closed", "session closed", "websocket", "connection"]):
+            await _invalidate_pooled_remote_browser(reason=f"render_failed:{exc!s}")
+        logger.warning(f"Remote pooled browser render failed: {exc!s}")
+        return None
+    finally:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
 
 
 def _mark_empty_remote_local_chain_failed() -> None:
@@ -380,7 +530,10 @@ async def _render_html_to_png_file_impl(
 
         if remote_endpoint:
             try:
-                browser = await connect(browserWSEndpoint=remote_endpoint)
+                browser = await asyncio.wait_for(
+                    connect(browserWSEndpoint=remote_endpoint),
+                    timeout=float(_HTML_RENDER_CONNECT_TIMEOUT_SEC),
+                )
                 remote_connected = True
             except Exception as exc:
                 launch_errors.append(f"remote({remote_endpoint}): {exc!s}")
@@ -438,11 +591,18 @@ async def _render_html_to_png_file_impl(
                         out_path=out_path,
                     )
 
+            # In remote mode, local fallback should be fast and conservative.
+            if remote_endpoint and executable_candidates:
+                executable_candidates = executable_candidates[:1]
+
             for candidate in list(executable_candidates):
                 try:
                     kwargs = dict(launch_kwargs)
                     kwargs["executablePath"] = candidate
-                    browser = await launch(**kwargs)
+                    browser = await asyncio.wait_for(
+                        launch(**kwargs),
+                        timeout=float(_HTML_RENDER_LAUNCH_TIMEOUT_SEC),
+                    )
                     break
                 except Exception as exc:
                     launch_errors.append(f"{candidate}: {exc!s}")
@@ -463,7 +623,10 @@ async def _render_html_to_png_file_impl(
 
             if browser is None:
                 try:
-                    browser = await launch(**launch_kwargs)
+                    browser = await asyncio.wait_for(
+                        launch(**launch_kwargs),
+                        timeout=float(_HTML_RENDER_LAUNCH_TIMEOUT_SEC),
+                    )
                 except Exception as exc:
                     launch_errors.append(f"default: {exc!s}")
                     detail = " | ".join(launch_errors[-3:]) if launch_errors else str(exc)
@@ -478,47 +641,59 @@ async def _render_html_to_png_file_impl(
                         out_path=out_path,
                     )
 
-        page = await browser.newPage()
+        page = await asyncio.wait_for(
+            browser.newPage(),
+            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
+        )
         await page.setViewport(
             {
                 "width": max(420, int(width)),
                 "height": max(320, int(min_height)),
-                "deviceScaleFactor": 2,
+                # Lower DSF keeps output crisp enough while reducing raster cost.
+                "deviceScaleFactor": 1.5,
             }
         )
-        await page.setContent(html)
-        await page.waitFor(120)
+        await asyncio.wait_for(
+            page.setContent(html),
+            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
+        )
 
-        content_height = await page.evaluate(
-            """
-            () => {
-              const body = document.body;
-              const doc = document.documentElement;
-              return Math.ceil(Math.max(
-                body ? body.scrollHeight : 0,
-                body ? body.offsetHeight : 0,
-                doc ? doc.clientHeight : 0,
-                doc ? doc.scrollHeight : 0,
-                doc ? doc.offsetHeight : 0,
-              ));
-            }
-            """
+        content_height = await asyncio.wait_for(
+            page.evaluate(
+                """
+                () => {
+                  const body = document.body;
+                  const doc = document.documentElement;
+                  return Math.ceil(Math.max(
+                    body ? body.scrollHeight : 0,
+                    body ? body.offsetHeight : 0,
+                    doc ? doc.clientHeight : 0,
+                    doc ? doc.scrollHeight : 0,
+                    doc ? doc.offsetHeight : 0,
+                  ));
+                }
+                """
+            ),
+            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
         )
 
         await page.setViewport(
             {
                 "width": max(420, int(width)),
                 "height": max(320, int(content_height or min_height)),
-                "deviceScaleFactor": 2,
+                "deviceScaleFactor": 1.5,
             }
         )
 
-        await page.screenshot(
-            {
-                "path": str(out_path),
-                "fullPage": True,
-                "type": "png",
-            }
+        await asyncio.wait_for(
+            page.screenshot(
+                {
+                    "path": str(out_path),
+                    "fullPage": True,
+                    "type": "png",
+                }
+            ),
+            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
         )
 
         return str(out_path)
@@ -572,6 +747,17 @@ async def render_html_to_png_file(
     prefix: str,
     min_height: int = 720,
 ) -> str | None:
+    if has_render_browser_ws_endpoint():
+        # Prefer pooled remote browser to avoid connect/disconnect overhead.
+        remote = await _render_html_to_png_with_remote_pool(
+            html=html,
+            width=width,
+            prefix=prefix,
+            min_height=min_height,
+        )
+        if remote:
+            return remote
+
     loop = asyncio.get_running_loop()
     fn = partial(
         _render_html_to_png_file_worker,

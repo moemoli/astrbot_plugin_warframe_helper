@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import random
+import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import urljoin
@@ -29,6 +30,30 @@ class QQOfficialWebhookPager:
         ) = None
         self._hooked_client_ids: set[int] = set()
 
+    def _sanitize_template_text(self, text: str, *, max_len: int = 1200) -> str:
+        raw = str(text or "").replace("\r", "\n")
+        if not raw.strip():
+            return " "
+
+        cleaned_lines: list[str] = []
+        for line in raw.split("\n"):
+            s = line.strip()
+            if not s:
+                continue
+            # Strip common markdown list prefixes first.
+            if s.startswith(("- ", "* ", "+ ", "1. ", "2. ", "3. ")):
+                s = s[2:].strip() if s[1:2] == " " else s
+            # Remove markdown syntax chars that QQ template params reject.
+            s = re.sub(r"[`*_~>\[\]()#|!]", "", s)
+            s = re.sub(r"\s+", " ", s).strip()
+            if s:
+                cleaned_lines.append(s)
+
+        out = " | ".join(cleaned_lines).strip() or " "
+        if len(out) > max(16, int(max_len)):
+            out = out[: max(16, int(max_len)) - 3] + "..."
+        return out
+
     def _template_markdown(
         self,
         *,
@@ -43,10 +68,24 @@ class QQOfficialWebhookPager:
         return {
             "custom_template_id": self._markdown_template_id,
             "params": [
-                {"key": "title", "values": [str(title).strip() or "Warframe 助手"]},
-                {"key": "kind", "values": [str(kind).strip() or "-"]},
-                {"key": "page", "values": [str(page).strip() or "-"]},
-                {"key": "hint", "values": [str(hint).strip() or " "]},
+                {
+                    "key": "title",
+                    "values": [
+                        self._sanitize_template_text(str(title).strip() or "Warframe 助手", max_len=64)
+                    ],
+                },
+                {
+                    "key": "kind",
+                    "values": [self._sanitize_template_text(str(kind).strip() or "-", max_len=64)],
+                },
+                {
+                    "key": "page",
+                    "values": [self._sanitize_template_text(str(page).strip() or "-", max_len=32)],
+                },
+                {
+                    "key": "hint",
+                    "values": [self._sanitize_template_text(str(hint).strip() or " ", max_len=1200)],
+                },
                 {"key": "image", "values": [str(image_url).strip() or " "]},
                 {"key": "image_w", "values": [str(max(1, int(image_width)))]},
                 {"key": "image_h", "values": [str(max(1, int(image_height)))]},
@@ -271,7 +310,7 @@ class QQOfficialWebhookPager:
 
         source = getattr(event.message_obj, "raw_message", None)
 
-        body = str(content or "").strip()
+        body = self._sanitize_template_text(str(content or "").strip(), max_len=1200)
 
         placeholder_url = await self._get_placeholder_image_url()
         if not placeholder_url:
