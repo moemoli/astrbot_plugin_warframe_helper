@@ -1,12 +1,12 @@
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, cast
+from typing import Any, cast
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 from astrbot.core.star.filter.command import GreedyStr
 
 from .clients.drop_data_client import DropDataClient
@@ -21,11 +21,11 @@ from .http_utils import set_direct_domains, set_proxy_url
 from .mappers.riven_mapping import WarframeRivenWeaponMapper
 from .mappers.riven_stats_mapping import WarframeRivenStatMapper
 from .mappers.term_mapping import WarframeTermMapper
+from .renderers.html_snapshot import set_render_browser_ws_endpoint
 from .renderers.template_loader import (
     set_current_render_command,
     set_render_template_name,
 )
-from .renderers.html_snapshot import set_render_browser_ws_endpoint
 from .renderers.worldstate_render import (
     WorldstateRow,
     render_worldstate_rows_image_to_file,
@@ -263,19 +263,14 @@ class QQResultDispatcher:
         )
 
 
-@register("warframe_helper", "moemoli", "Warframe 助手", "v0.1.2")
 class WarframeHelperPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context, config)
         self.config = config
 
         set_render_template_name(_parse_render_template_name(self.config))
-        set_render_browser_ws_endpoint(
-            _parse_render_browser_ws_endpoint(self.config)
-        )
-        self._enable_no_prefix_commands = _parse_enable_no_prefix_commands(
-            self.config
-        )
+        set_render_browser_ws_endpoint(_parse_render_browser_ws_endpoint(self.config))
+        self._enable_no_prefix_commands = _parse_enable_no_prefix_commands(self.config)
 
         _apply_proxy_config(self.config)
 
@@ -513,6 +508,32 @@ class WarframeHelperPlugin(Star):
             "syndicates": self.wf_syndicates,
         }
 
+    def _parse_no_prefix_command(self, text: str) -> tuple[str | None, str]:
+        """Resolve no-prefix command and raw args from an arbitrary text line."""
+        src = (text or "").strip()
+        if not src:
+            return None, ""
+
+        command_map = self._no_prefix_handler_map()
+        lowered = src.lower()
+
+        # Longest-match first to avoid `wf` shadowing `wfmap`.
+        for cmd in sorted(command_map.keys(), key=len, reverse=True):
+            cmd_l = cmd.lower()
+            if not lowered.startswith(cmd_l):
+                continue
+
+            rest = src[len(cmd) :]
+
+            # For ASCII commands, require a boundary to avoid accidental hits
+            # like `wfmapping` being interpreted as `wf`.
+            if rest and (not rest[0].isspace()) and cmd.isascii():
+                continue
+
+            return cmd_l, rest.strip()
+
+        return None, ""
+
     @filter.regex(r"^\S(?:[\s\S]*)$")
     async def no_prefix_command_router(self, event: AstrMessageEvent):
         if not self._enable_no_prefix_commands:
@@ -522,7 +543,9 @@ class WarframeHelperPlugin(Star):
         # Messages that already entered wake/command flow (e.g. "/指令", @bot)
         # are handled by regular command filters and must not be dispatched again.
         if getattr(event, "is_at_or_wake_command", False):
-            self._debug_log("no_prefix_skip", event=event, reason="wake_or_command_flow")
+            self._debug_log(
+                "no_prefix_skip", event=event, reason="wake_or_command_flow"
+            )
             return
 
         text = (event.get_message_str() or "").strip()
@@ -538,9 +561,10 @@ class WarframeHelperPlugin(Star):
             self._debug_log("no_prefix_skip", event=event, reason="numeric_reply")
             return
 
-        token, _, rest = text.partition(" ")
-        command = token.strip().lower()
-        raw_args = rest.strip()
+        command, raw_args = self._parse_no_prefix_command(text)
+        if not command:
+            self._debug_log("no_prefix_miss", event=event, command="")
+            return
 
         handler = self._no_prefix_handler_map().get(command)
         if handler is None:
@@ -556,7 +580,9 @@ class WarframeHelperPlugin(Star):
             async for res in handler_fn(event, raw_args):
                 yield res
         except TypeError:
-            self._debug_log("no_prefix_retry_without_args", event=event, command=command)
+            self._debug_log(
+                "no_prefix_retry_without_args", event=event, command=command
+            )
             async for res in handler_fn(event):
                 yield res
 

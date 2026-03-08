@@ -404,8 +404,21 @@ class SubscriptionService:
             query = " ".join([str(t) for t in tokens[:-1]]).strip()
             return query, n
 
+        if last.endswith("次") and last[:-1].isdigit():
+            n = int(last[:-1])
+            if n <= 0:
+                n = 1
+            query = " ".join([str(t) for t in tokens[:-1]]).strip()
+            return query, n
+
         if raw.endswith("永久") and len(raw) > 2:
             return raw[: -len("永久")].strip(), None
+        m = re.search(r"(\d+)\s*次$", raw)
+        if m:
+            n = int(m.group(1))
+            if n <= 0:
+                n = 1
+            return raw[: m.start()].strip(), n
         m = re.search(r"(\d+)$", raw)
         if m:
             n = int(m.group(1))
@@ -414,6 +427,16 @@ class SubscriptionService:
             return raw[: -len(m.group(1))].strip(), n
 
         return raw, None
+
+    def _build_proactive_message(self, *, sub: dict, lines: list[str]) -> MessageChain:
+        chain = MessageChain()
+        mention_id = str(sub.get("subscriber_id") or "").strip()
+        mention_name = str(sub.get("subscriber_name") or "").strip()
+        if mention_id:
+            chain.at(mention_name or mention_id, mention_id)
+            chain.message("\n")
+        chain.message("\n".join(lines))
+        return chain
 
     async def guess_fissure_subscribe_query_via_llm(
         self, *, event: AstrMessageEvent, query: str, platform_norm: Platform
@@ -619,6 +642,8 @@ class SubscriptionService:
 
         rec["session"] = event.unified_msg_origin
         rec["remaining"] = remaining
+        rec["subscriber_id"] = str(event.get_sender_id() or "").strip()
+        rec["subscriber_name"] = str(event.get_sender_name() or "").strip()
 
         async with self._lock:
             for s in self._subscriptions:
@@ -635,7 +660,9 @@ class SubscriptionService:
                     ):
                         if isinstance(remaining, int):
                             s["remaining"] = remaining
-                            self._save()
+                        s["subscriber_id"] = rec.get("subscriber_id")
+                        s["subscriber_name"] = rec.get("subscriber_name")
+                        self._save()
                         return (
                             f"已订阅：{rec.get('plain', '夜灵平原')} {rec.get('state', '?')}（{rec.get('platform', 'pc')}）"
                         ), None
@@ -651,7 +678,9 @@ class SubscriptionService:
                     ):
                         if isinstance(remaining, int):
                             s["remaining"] = remaining
-                            self._save()
+                        s["subscriber_id"] = rec.get("subscriber_id")
+                        s["subscriber_name"] = rec.get("subscriber_name")
+                        self._save()
                         return (
                             f"已订阅：{rec['kind']} {rec['planet']}{(rec.get('tier') or '')}{rec['mission_type']}（{rec['platform']}）"
                         ), None
@@ -859,7 +888,7 @@ class SubscriptionService:
                                 lines.append(
                                     f"- {tag} {f.tier} {f.mission_type} {f.node} | 剩余{f.eta}"
                                 )
-                            msg = MessageChain().message("\n".join(lines))
+                            msg = self._build_proactive_message(sub=s, lines=lines)
                             await self._context.send_message(session, msg)
 
                             if isinstance(remaining, int):
@@ -917,7 +946,7 @@ class SubscriptionService:
                                     f"【平原订阅】夜灵平原已进入：{current_state}（{platform_norm}）",
                                     f"剩余{left}",
                                 ]
-                                msg = MessageChain().message("\n".join(lines))
+                                msg = self._build_proactive_message(sub=s, lines=lines)
                                 await self._context.send_message(session, msg)
 
                                 if isinstance(remaining, int):
