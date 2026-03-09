@@ -418,7 +418,7 @@ class SubscriptionService:
             return raw, None
 
         last = str(tokens[-1]).strip()
-        if last == "永久":
+        if last == "永久" or last == "长期" or last == "永远":
             query = " ".join([str(t) for t in tokens[:-1]]).strip()
             return query, None
 
@@ -436,7 +436,9 @@ class SubscriptionService:
             query = " ".join([str(t) for t in tokens[:-1]]).strip()
             return query, n
 
-        if raw.endswith("永久") and len(raw) > 2:
+        if (
+            raw.endswith("永久") or raw.endswith("长期") or raw.endswith("永远")
+        ) and len(raw) > 2:
             return raw[: -len("永久")].strip(), None
         m = re.search(r"(\d+)\s*次$", raw)
         if m:
@@ -457,7 +459,7 @@ class SubscriptionService:
                 n = 1
             return raw[: -len(m.group(1))].strip(), n
 
-        return raw, None
+        return raw, 1
 
     def _build_proactive_message(self, *, sub: dict, lines: list[str]) -> MessageChain:
         chain = MessageChain()
