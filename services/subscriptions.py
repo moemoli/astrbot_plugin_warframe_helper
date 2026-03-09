@@ -386,8 +386,33 @@ class SubscriptionService:
 
     def parse_subscribe_times(self, raw_args: str) -> tuple[str, int | None]:
         raw = (raw_args or "").strip()
+        # Be tolerant to callers that may pass the full command text.
+        for head in ("/订阅", "订阅", "/退订", "退订"):
+            if raw.startswith(head):
+                rest = raw[len(head) :].strip()
+                if rest:
+                    raw = rest
+                break
+
+        # Some adapters append transport metadata to message_str, e.g.
+        # "[MSG_ID:xxx]". Strip such trailing tags before parsing times.
+        meta_tag_re = re.compile(
+            r"\s*[\[【](?:msg_id|message_id|msgid|event_id|trace_id|reply_id|seq|nonce)"
+            r"\s*[:=：][^\]】\n]*[\]】]\s*$",
+            flags=re.IGNORECASE,
+        )
+        while True:
+            cleaned = meta_tag_re.sub("", raw)
+            if cleaned == raw:
+                break
+            raw = cleaned.strip()
+
         if not raw:
             return "", None
+
+        # Normalize trailing punctuation from IM inputs, e.g. "... 1。".
+        raw = re.sub(r"[。！!？?,，;；、]+$", "", raw).strip()
+
         tokens = split_tokens(raw)
         if not tokens:
             return raw, None
@@ -419,6 +444,12 @@ class SubscriptionService:
             if n <= 0:
                 n = 1
             return raw[: m.start()].strip(), n
+        m = re.search(r"(\d+)\s*次?\s*[。！!？?,，;；、]*$", raw)
+        if m:
+            n = int(m.group(1))
+            if n <= 0:
+                n = 1
+            return raw[: m.start()].strip(), n
         m = re.search(r"(\d+)$", raw)
         if m:
             n = int(m.group(1))
@@ -432,10 +463,11 @@ class SubscriptionService:
         chain = MessageChain()
         mention_id = str(sub.get("subscriber_id") or "").strip()
         mention_name = str(sub.get("subscriber_name") or "").strip()
-        if mention_id:
-            chain.at(mention_name or mention_id, mention_id)
-            chain.message("\n")
+
         chain.message("\n".join(lines))
+        if mention_id:
+            chain.message("\n")
+            chain.at(mention_name or mention_id, mention_id)
         return chain
 
     async def guess_fissure_subscribe_query_via_llm(
