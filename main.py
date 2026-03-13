@@ -1,4 +1,5 @@
 import asyncio
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
@@ -17,6 +18,7 @@ from .components.event_ttl_cache import EventScopedTTLCache
 from .components.qq_official_webhook import QQOfficialWebhookPager
 from .handlers.qq_interaction import handle_qq_interaction_create
 from .handlers.wm_pick import handle_wm_pick_number
+from .helpers import split_tokens
 from .http_utils import set_direct_domains, set_proxy_url
 from .mappers.riven_mapping import WarframeRivenWeaponMapper
 from .mappers.riven_stats_mapping import WarframeRivenStatMapper
@@ -166,6 +168,38 @@ def _parse_render_browser_ws_endpoint(config: dict | None) -> str:
 def _parse_enable_no_prefix_commands(config: dict | None) -> bool:
     cfg = config or {}
     return bool(cfg.get("enable_no_prefix_commands"))
+
+
+def _convert_wm_args_to_wmr(raw_args: str) -> str | None:
+    tokens = split_tokens(str(raw_args or "").strip())
+    if not tokens:
+        return None
+
+    converted: list[str] = []
+    is_riven_query = False
+    for token in tokens:
+        t = str(token or "").strip()
+        if not t:
+            continue
+
+        t_lower = t.lower()
+        if t in {"紫卡", "裂罅", "裂罅mod"} or t_lower in {"riven", "rivenmod"}:
+            is_riven_query = True
+            continue
+
+        t_clean = t.replace("紫卡", "").replace("裂罅", "")
+        t_clean = re.sub(r"(?i)riven", "", t_clean)
+        if t_clean != t:
+            is_riven_query = True
+        t_clean = t_clean.strip()
+        if not t_clean:
+            continue
+
+        converted.append(t_clean)
+
+    if not is_riven_query:
+        return None
+    return " ".join(converted)
 
 
 class QQResultDispatcher:
@@ -923,11 +957,36 @@ class WarframeHelperPlugin(Star):
         - /wm 猴p pc 收
         - /wm 猴p pc 收 zh 10
         """
+        raw_args = str(args)
+        converted_wmr_args = _convert_wm_args_to_wmr(raw_args)
+        if converted_wmr_args is not None:
+            set_current_render_command("/wmr")
+            async for res in cmd_wmr(
+                context=self.context,
+                event=event,
+                raw_args=converted_wmr_args,
+                config=self.config,
+                market_client=self.market_client,
+                riven_weapon_mapper=self.riven_weapon_mapper,
+                riven_stat_mapper=self.riven_stat_mapper,
+                pager_cache=self._pager_cache,
+                qq_pager=self._qq_pager,
+            ):
+                if await self._qq_dispatcher.try_send_markdown_text_for_result(
+                    event=event,
+                    result=res,
+                    title="紫卡拍卖",
+                ):
+                    yield event.make_result().stop_event()
+                    return
+                yield res
+            return
+
         set_current_render_command("/wm")
         async for res in cmd_wm(
             context=self.context,
             event=event,
-            raw_args=str(args),
+            raw_args=raw_args,
             config=self.config,
             term_mapper=self.term_mapper,
             market_client=self.market_client,
