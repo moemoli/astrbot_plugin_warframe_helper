@@ -121,6 +121,10 @@ async def ensure_playwright_runtime_ready(*, browser: str | None = None) -> None
     if _PLAYWRIGHT_INSTALL_DONE:
         return
 
+    if _find_browser_executable():
+        _PLAYWRIGHT_INSTALL_DONE = True
+        return
+
     async with _PLAYWRIGHT_INSTALL_LOCK:
         if _PLAYWRIGHT_INSTALL_DONE:
             return
@@ -204,13 +208,14 @@ def is_playwright_runtime_preparing() -> bool:
 
 
 def start_playwright_runtime_prepare(*, browser: str | None = None) -> None:
-    global _PLAYWRIGHT_PREPARE_TASK, _PLAYWRIGHT_PREPARING_SKIP_LOGGED
+    global _PLAYWRIGHT_INSTALL_DONE, _PLAYWRIGHT_PREPARE_TASK, _PLAYWRIGHT_PREPARING_SKIP_LOGGED
 
     if _PLAYWRIGHT_PREPARE_TASK is not None and not _PLAYWRIGHT_PREPARE_TASK.done():
         return
 
     local_browser = _find_browser_executable()
     if local_browser:
+        _PLAYWRIGHT_INSTALL_DONE = True
         logger.info(
             f"local browser found, skip playwright install prepare: {local_browser}"
         )
