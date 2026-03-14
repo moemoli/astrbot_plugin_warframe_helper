@@ -1,3 +1,0 @@
-﻿URL=https://www.wegame.com.cn/api/act/index.php/xjzj/xjzj20220330/index/ajax_get_worldState?uuid=b54590a0-09d5-40d5-a1c3-db9016b8a135&version=2&appid=10003&t=1773501424&sign=f887288278b7ab03b9f36360d6d59872
-STATUS=200
-BODY={"status":"0","data":"-16"}

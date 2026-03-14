@@ -103,7 +103,7 @@ class SubscriptionService:
 
     def _worldstate_platform_from_tokens(self, tokens: list[str]) -> Platform:
         p = parse_platform(tokens, WORLDSTATE_PLATFORM_ALIASES, default="pc")
-        if p in {"pc", "ps4", "xb1", "swi"}:
+        if p in {"pc", "cn", "ps4", "xb1", "swi"}:
             return cast(Platform, p)
         return "pc"
 
@@ -861,7 +861,7 @@ class SubscriptionService:
                 to_remove_ids: set[str] = set()
 
                 for platform_norm, s_list in by_platform.items():
-                    if platform_norm not in {"pc", "ps4", "xb1", "swi"}:
+                    if platform_norm not in {"pc", "cn", "ps4", "xb1", "swi"}:
                         platform_norm = "pc"
 
                     fissure_subs: list[dict] = []

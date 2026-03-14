@@ -6,3 +6,4 @@ Pillow
 playwright
 qq-botpy
 Jinja2
+hanziconv

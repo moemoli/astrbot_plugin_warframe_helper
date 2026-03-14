@@ -519,6 +519,7 @@ async def cmd_plains(
 
     plains: list[tuple[str, set[str]]] = [
         ("夜灵平原", {"夜灵平原", "希图斯", "cetus", "poe"}),
+        ("地球昼夜", {"地球", "地球昼夜", "earth"}),
         (
             "奥布山谷",
             {
@@ -532,6 +533,7 @@ async def cmd_plains(
             },
         ),
         ("魔胎之境", {"魔胎之境", "魔胎", "cambion"}),
+        ("扎利曼号", {"扎利曼号", "扎利曼", "zariman", "chrysalith"}),
         ("双衍王境", {"双衍王境", "双衍王镜", "双衍", "duviri"}),
     ]
 
@@ -583,7 +585,57 @@ async def cmd_plains(
                 plain_prefix="夜灵平原",
             )
 
+        if plain_name == "地球昼夜":
+            info = await worldstate_client.fetch_earth_cycle(
+                platform=platform_norm, language="zh"
+            )
+            if info is None:
+                return event.plain_result(
+                    "未获取到地球循环信息（可能是网络限制或接口不可达）。"
+                )
+            state_cn = info.state or (
+                "白天" if info.is_day else ("夜晚" if info.is_day is False else "未知")
+            )
+            left = info.time_left or info.eta
+            return await render_worldstate_cycle(
+                event,
+                title="地球昼夜",
+                platform_norm=platform_norm,
+                state_cn=state_cn,
+                left=left,
+                start_time=getattr(info, "start_time", None),
+                end_time=getattr(info, "end_time", None),
+                reward_rows=[],
+                accent=(20, 184, 166, 255),
+                plain_prefix="地球",
+            )
+
+        if plain_name == "扎利曼号":
+            info = await worldstate_client.fetch_zariman_cycle(
+                platform=platform_norm, language="zh"
+            )
+            if info is None:
+                return event.plain_result(
+                    "未获取到扎利曼号信息（可能是网络限制或接口不可达）。"
+                )
+            state_cn = (info.state or "未知").strip()
+            left = info.time_left or info.eta
+            return await render_worldstate_cycle(
+                event,
+                title="扎利曼号",
+                platform_norm=platform_norm,
+                state_cn=state_cn,
+                left=left,
+                start_time=getattr(info, "start_time", None),
+                end_time=getattr(info, "end_time", None),
+                reward_rows=[],
+                accent=(20, 184, 166, 255),
+                plain_prefix="扎利曼号",
+            )
+
         if plain_name == "双衍王境":
+            if platform_norm == "cn":
+                return event.plain_result("暂无国服双衍王境数据。")
             cycle = await worldstate_client.fetch_duviri_cycle(
                 platform=platform_norm, language="zh"
             )
@@ -695,6 +747,13 @@ async def cmd_plains(
         cetus = None
 
     try:
+        earth = await worldstate_client.fetch_earth_cycle(
+            platform=platform_norm, language="zh"
+        )
+    except Exception:
+        earth = None
+
+    try:
         vallis = await worldstate_client.fetch_vallis_cycle(
             platform=platform_norm, language="zh"
         )
@@ -709,10 +768,20 @@ async def cmd_plains(
         cambion = None
 
     try:
-        duviri = await worldstate_client.fetch_duviri_cycle(
+        zariman = await worldstate_client.fetch_zariman_cycle(
             platform=platform_norm, language="zh"
         )
     except Exception:
+        zariman = None
+
+    if platform_norm != "cn":
+        try:
+            duviri = await worldstate_client.fetch_duviri_cycle(
+                platform=platform_norm, language="zh"
+            )
+        except Exception:
+            duviri = None
+    else:
         duviri = None
 
     rows: list[WorldstateRow] = []
@@ -727,6 +796,19 @@ async def cmd_plains(
         rows.append(
             WorldstateRow(
                 title="夜灵平原", subtitle=f"当前：{state_cn}", right=f"剩余{left}"
+            )
+        )
+
+    if earth is None:
+        rows.append(WorldstateRow(title="地球昼夜", subtitle="(获取失败)", right=None))
+    else:
+        state_cn = earth.state or (
+            "白天" if earth.is_day else ("夜晚" if earth.is_day is False else "未知")
+        )
+        left = earth.time_left or earth.eta
+        rows.append(
+            WorldstateRow(
+                title="地球昼夜", subtitle=f"当前：{state_cn}", right=f"剩余{left}"
             )
         )
 
@@ -756,16 +838,28 @@ async def cmd_plains(
             )
         )
 
-    if duviri is None:
-        rows.append(WorldstateRow(title="双衍王境", subtitle="(获取失败)", right=None))
+    if zariman is None:
+        rows.append(WorldstateRow(title="扎利曼号", subtitle="(获取失败)", right=None))
     else:
-        state_cn = (duviri.state or "未知").strip()
-        left = duviri.time_left or duviri.eta
+        state_cn = (zariman.state or "未知").strip()
+        left = zariman.time_left or zariman.eta
         rows.append(
             WorldstateRow(
-                title="双衍王境", subtitle=f"当前：{state_cn}", right=f"剩余{left}"
+                title="扎利曼号", subtitle=f"当前：{state_cn}", right=f"剩余{left}"
             )
         )
+
+    if platform_norm != "cn":
+        if duviri is None:
+            rows.append(WorldstateRow(title="双衍王境", subtitle="(获取失败)", right=None))
+        else:
+            state_cn = (duviri.state or "未知").strip()
+            left = duviri.time_left or duviri.eta
+            rows.append(
+                WorldstateRow(
+                    title="双衍王境", subtitle=f"当前：{state_cn}", right=f"剩余{left}"
+                )
+            )
 
     rendered = await render_worldstate_rows_image_to_file(
         title="平原状态",
