@@ -28,6 +28,7 @@ def _env_int(name: str, default: int) -> int:
 _HTML_RENDER_CONNECT_TIMEOUT_SEC = max(1, _env_int("WF_HTML_RENDER_CONNECT_TIMEOUT", 4))
 _HTML_RENDER_LAUNCH_TIMEOUT_SEC = max(2, _env_int("WF_HTML_RENDER_LAUNCH_TIMEOUT", 8))
 _HTML_RENDER_PAGE_TIMEOUT_SEC = max(2, _env_int("WF_HTML_RENDER_PAGE_TIMEOUT", 6))
+_IMAGE_CACHE_DIR_OVERRIDE = ""
 
 _PLAYWRIGHT_INSTALL_LOCK = asyncio.Lock()
 _PLAYWRIGHT_INSTALL_DONE = False
@@ -59,6 +60,27 @@ class _PlaywrightRuntime:
 
 
 _PLAYWRIGHT_RUNTIME = _PlaywrightRuntime()
+
+
+def configure_image_cache(
+    *,
+    cache_dir: str | None = None,
+) -> None:
+    global _IMAGE_CACHE_DIR_OVERRIDE
+
+    if cache_dir is not None:
+        _IMAGE_CACHE_DIR_OVERRIDE = str(cache_dir or "").strip()
+
+
+def _get_image_cache_dir() -> Path:
+    override = str(_IMAGE_CACHE_DIR_OVERRIDE or "").strip()
+    if not override:
+        return Path(get_astrbot_temp_path())
+
+    path = Path(override).expanduser()
+    if not path.is_absolute():
+        path = Path(get_astrbot_temp_path()) / path
+    return path
 
 
 async def _run_playwright_cli(
@@ -370,7 +392,7 @@ async def _render_html_to_png_file_impl(
     prefix: str,
     min_height: int = 720,
 ) -> str | None:
-    temp_dir = Path(get_astrbot_temp_path())
+    temp_dir = _get_image_cache_dir()
     temp_dir.mkdir(parents=True, exist_ok=True)
     out_path = temp_dir / f"{prefix}_{uuid.uuid4().hex}.png"
 

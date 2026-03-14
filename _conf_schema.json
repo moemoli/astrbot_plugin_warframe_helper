@@ -40,6 +40,12 @@
         "description": "渲染模板名称",
         "hint": "用于选择 HTML 模板目录名。插件会读取 assets/template/<模板名>/ 下的 status_list.html、cycle_status.html、wm.html、wmr.html；若不存在则回退到 assets/template/default/。"
     },
+    "image_cache_dir": {
+        "type": "string",
+        "default": "",
+        "description": "图片缓存目录",
+        "hint": "渲染图片的缓存目录。为空时使用 AstrBot 默认临时目录；支持绝对路径，或相对于默认临时目录的相对路径。"
+    },
     "enable_no_prefix_commands": {
         "type": "bool",
         "default": false,

@@ -25,7 +25,10 @@ from .http_utils import set_direct_domains, set_proxy_url
 from .mappers.riven_mapping import WarframeRivenWeaponMapper
 from .mappers.riven_stats_mapping import WarframeRivenStatMapper
 from .mappers.term_mapping import WarframeTermMapper
-from .renderers.html_snapshot import start_playwright_runtime_prepare
+from .renderers.html_snapshot import (
+    configure_image_cache,
+    start_playwright_runtime_prepare,
+)
 from .renderers.template_loader import (
     has_render_template_name,
     list_available_render_template_names,
@@ -188,6 +191,12 @@ def _parse_render_template_name(config: dict | None) -> str:
 def _parse_enable_no_prefix_commands(config: dict | None) -> bool:
     cfg = config or {}
     return bool(cfg.get("enable_no_prefix_commands"))
+
+
+def _parse_image_cache_config(config: dict | None) -> str:
+    cfg = config or {}
+    cache_dir = str(cfg.get("image_cache_dir") or "").strip()
+    return cache_dir
 
 
 def _convert_wm_args_to_wmr(raw_args: str) -> str | None:
@@ -372,6 +381,11 @@ class WarframeHelperPlugin(Star):
         set_render_template_resolver(self._resolve_session_template)
         self._enable_no_prefix_commands = _parse_enable_no_prefix_commands(self.config)
 
+        image_cache_dir = _parse_image_cache_config(self.config)
+        configure_image_cache(
+            cache_dir=image_cache_dir,
+        )
+
         _apply_proxy_config(self.config)
 
         self.term_mapper = WarframeTermMapper()
@@ -526,6 +540,41 @@ class WarframeHelperPlugin(Star):
             page=page,
             hint=hint,
         )
+
+    async def _cleanup_result_image_file(self, result) -> None:
+        image_path = self._qq_dispatcher.extract_image_path_from_result(result)
+        if not image_path:
+            return
+
+        try:
+            path = Path(image_path).expanduser()
+        except Exception:
+            return
+
+        filename = path.name.lower()
+        is_plugin_generated = (
+            filename == "wf_helper_blank_1x1.png"
+            or (filename.startswith("wf_worldstate_") and filename.endswith(".png"))
+            or (filename.startswith("wm_") and filename.endswith(".png"))
+            or (filename.startswith("wmr_") and filename.endswith(".png"))
+        )
+        if not is_plugin_generated:
+            return
+
+        try:
+            path.unlink(missing_ok=True)
+        except Exception as exc:
+            self._debug_log(
+                "result_image_cleanup_failed",
+                image_path=str(path),
+                error=str(exc),
+            )
+
+    async def _yield_result_and_cleanup_image(self, result):
+        try:
+            yield result
+        finally:
+            await self._cleanup_result_image_file(result)
 
     def _no_prefix_handler_map(self) -> dict[str, Callable[..., Any]]:
         return {
@@ -736,7 +785,9 @@ class WarframeHelperPlugin(Star):
                         yield event.make_result().stop_event()
                         return
 
-            yield event.chain_result(chain.chain)
+            result = event.chain_result(chain.chain)
+            async for output in self._yield_result_and_cleanup_image(result):
+                yield output
             return
         if msg:
             if self._qq_pager.enabled_for(event):
@@ -802,7 +853,9 @@ class WarframeHelperPlugin(Star):
                 if ok:
                     yield event.make_result().stop_event()
                     return
-        yield event.chain_result(chain.chain)
+        result = event.chain_result(chain.chain)
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("执行官猎杀", alias={"archon", "执行官"})
     async def wf_archon_hunt(
@@ -824,7 +877,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("钢铁奖励", alias={"steelreward", "sp奖励"})
     async def wf_steel_reward(
@@ -846,7 +900,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("wfmap", alias={"wf映射"})
     async def wfmap(self, event: AstrMessageEvent, query: str = ""):
@@ -863,7 +918,8 @@ class WarframeHelperPlugin(Star):
             ):
                 yield event.make_result().stop_event()
                 return
-            yield result
+            async for output in self._yield_result_and_cleanup_image(result):
+                yield output
             return
 
         item = await self.term_mapper.resolve_with_ai(
@@ -884,7 +940,8 @@ class WarframeHelperPlugin(Star):
             ):
                 yield event.make_result().stop_event()
                 return
-            yield result
+            async for output in self._yield_result_and_cleanup_image(result):
+                yield output
             return
 
         header = [f"{query} -> {item.name}", f"slug: {item.slug}"]
@@ -909,7 +966,8 @@ class WarframeHelperPlugin(Star):
             ):
                 yield event.make_result().stop_event()
                 return
-            yield result
+            async for output in self._yield_result_and_cleanup_image(result):
+                yield output
             return
 
         extra = f"\nWiki: {item.wiki_link}" if item.wiki_link else ""
@@ -922,7 +980,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command_group("wf")
     def wf(self):
@@ -932,19 +991,22 @@ class WarframeHelperPlugin(Star):
     async def wf_help_cmd(self, event: AstrMessageEvent):
         _safe_disable_llm(event, reason="/wf help")
         result = await self._handle_wf_help(event)
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @wf.command("refresh", alias={"reset", "刷新", "刷新缓存", "重置缓存"})
     async def wf_refresh_cmd(self, event: AstrMessageEvent):
         _safe_disable_llm(event, reason="/wf refresh")
         result = await self._handle_wf_refresh(event)
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("wf帮助")
     async def wf_help_alias(self, event: AstrMessageEvent):
         _safe_disable_llm(event, reason="/wf 帮助")
         result = await self._handle_wf_help(event)
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     async def _handle_wf_refresh(self, event: AstrMessageEvent):
         if not event.is_admin():
@@ -1107,7 +1169,8 @@ class WarframeHelperPlugin(Star):
                 ):
                     yield event.make_result().stop_event()
                     return
-                yield res
+                async for output in self._yield_result_and_cleanup_image(res):
+                    yield output
             return
 
         set_current_render_command("/wm")
@@ -1129,7 +1192,8 @@ class WarframeHelperPlugin(Star):
             ):
                 yield event.make_result().stop_event()
                 return
-            yield res
+            async for output in self._yield_result_and_cleanup_image(res):
+                yield output
 
     @filter.command("wmr")
     async def wmr(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
@@ -1159,7 +1223,8 @@ class WarframeHelperPlugin(Star):
             ):
                 yield event.make_result().stop_event()
                 return
-            yield res
+            async for output in self._yield_result_and_cleanup_image(res):
+                yield output
 
     @filter.command("wfp")
     async def wf_page(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
@@ -1188,7 +1253,8 @@ class WarframeHelperPlugin(Star):
             ):
                 yield event.make_result().stop_event()
                 return
-            yield res
+            async for output in self._yield_result_and_cleanup_image(res):
+                yield output
 
     @filter.regex(r"^(上一页|下一页|prev|previous|next)$")
     async def qq_official_webhook_button_page(self, event: AstrMessageEvent):
@@ -1220,7 +1286,8 @@ class WarframeHelperPlugin(Star):
             market_client=self.market_client,
             qq_pager=self._qq_pager,
         ):
-            yield res
+            async for output in self._yield_result_and_cleanup_image(res):
+                yield output
 
     @filter.regex(r"^\d+$")
     async def wm_pick_number(self, event: AstrMessageEvent):
@@ -1236,7 +1303,8 @@ class WarframeHelperPlugin(Star):
             ):
                 yield event.make_result().stop_event()
                 return
-            yield res
+            async for output in self._yield_result_and_cleanup_image(res):
+                yield output
 
     @filter.command("突击", alias={"sortie"})
     async def wf_sortie(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
@@ -1256,7 +1324,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("警报", alias={"alerts"})
     async def wf_alerts(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
@@ -1276,7 +1345,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("裂缝", alias={"fissure"})
     async def wf_fissures(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
@@ -1296,7 +1366,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("九重天裂缝", alias={"风暴裂缝"})
     async def wf_fissures_storm(
@@ -1318,7 +1389,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("钢铁裂缝")
     async def wf_fissures_hard(
@@ -1340,7 +1412,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("普通裂缝")
     async def wf_fissures_normal(
@@ -1362,7 +1435,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("奸商", alias={"虚空商人", "baro"})
     async def wf_void_trader(
@@ -1384,7 +1458,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("仲裁", alias={"arbitration"})
     async def wf_arbitration(
@@ -1406,7 +1481,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("电波", alias={"夜波", "nightwave"})
     async def wf_nightwave(
@@ -1456,7 +1532,8 @@ class WarframeHelperPlugin(Star):
                 )
                 return
 
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("平原")
     async def wf_plains(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
@@ -1480,7 +1557,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("夜灵平原", alias={"希图斯", "cetus", "poe"})
     async def wf_cetus_cycle(
@@ -1503,7 +1581,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("魔胎之境", alias={"魔胎", "cambion"})
     async def wf_cambion_cycle(
@@ -1526,7 +1605,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("地球昼夜", alias={"地球循环", "地球", "earth"})
     async def wf_earth_cycle(
@@ -1549,7 +1629,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command(
         "奥布山谷",
@@ -1575,7 +1656,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("双衍王境", alias={"双衍", "双衍循环", "双衍王镜", "duviri"})
     async def wf_duviri_cycle(
@@ -1598,7 +1680,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("轮回奖励", alias={"双衍轮回", "双衍轮回奖励", "circuit"})
     async def wf_duviri_circuit_rewards(
@@ -1620,7 +1703,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("武器", alias={"weapon", "wfweapon"})
     async def wf_weapon(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
@@ -1640,7 +1724,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("战甲", alias={"warframe", "frame", "wfwarframe"})
     async def wf_warframe(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
@@ -1660,7 +1745,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("MOD", alias={"mod", "模组", "mods"})
     async def wf_mod(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
@@ -1680,7 +1766,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("掉落", alias={"drop", "drops"})
     async def wf_drops(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
@@ -1701,7 +1788,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("遗物", alias={"relic", "relics"})
     async def wf_relic(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
@@ -1721,7 +1809,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("入侵", alias={"invasions"})
     async def wf_invasions(
@@ -1743,7 +1832,8 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
 
     @filter.command("集团", alias={"syndicate", "syndicates"})
     async def wf_syndicates(
@@ -1772,4 +1862,5 @@ class WarframeHelperPlugin(Star):
         ):
             yield event.make_result().stop_event()
             return
-        yield result
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
