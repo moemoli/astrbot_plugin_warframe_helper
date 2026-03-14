@@ -9,6 +9,7 @@ from jinja2 import Environment
 _TEMPLATE_NAME = "default"
 _VALID_TEMPLATE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _CURRENT_COMMAND = contextvars.ContextVar("wf_render_command", default="")
+_CURRENT_TEMPLATE_NAME = contextvars.ContextVar("wf_render_template_name", default="")
 _JINJA_ENV = Environment(autoescape=True)
 
 _WORLD_CYCLE_COMMANDS = {
@@ -82,6 +83,46 @@ def set_current_render_command(command: str | None) -> None:
     _CURRENT_COMMAND.set(_normalize_command_key(command))
 
 
+def set_current_render_template_name(name: str | None) -> None:
+    s = str(name or "").strip()
+    if not s:
+        _CURRENT_TEMPLATE_NAME.set("")
+        return
+    if not _VALID_TEMPLATE_RE.match(s):
+        _CURRENT_TEMPLATE_NAME.set("")
+        return
+    _CURRENT_TEMPLATE_NAME.set(s)
+
+
+def has_render_template_name(name: str | None) -> bool:
+    s = str(name or "").strip()
+    if not s or not _VALID_TEMPLATE_RE.match(s):
+        return False
+    base = _plugin_root() / "assets" / "template"
+    p = base / s
+    return p.exists() and p.is_dir()
+
+
+def list_available_render_template_names() -> list[str]:
+    base = _plugin_root() / "assets" / "template"
+    out: list[str] = []
+    try:
+        if base.exists() and base.is_dir():
+            for p in base.iterdir():
+                if not p.is_dir():
+                    continue
+                name = p.name.strip()
+                if not _VALID_TEMPLATE_RE.match(name):
+                    continue
+                out.append(name)
+    except Exception:
+        pass
+    if "default" not in out:
+        out.append("default")
+    out = sorted(set(out), key=lambda x: x.lower())
+    return out
+
+
 def get_render_template_name() -> str:
     return _TEMPLATE_NAME
 
@@ -109,8 +150,14 @@ def _family_template_filename(command_key: str, filename: str) -> str:
     return ""
 
 
-def _template_file_candidates(filename: str, template_name: str | None = None) -> list[Path]:
-    selected = str(template_name or "").strip() or _TEMPLATE_NAME
+def _template_file_candidates(
+    filename: str, template_name: str | None = None
+) -> list[Path]:
+    selected = (
+        str(template_name or "").strip()
+        or str(_CURRENT_TEMPLATE_NAME.get() or "").strip()
+        or _TEMPLATE_NAME
+    )
     base = _plugin_root() / "assets" / "template"
     command_key = _normalize_command_key(_CURRENT_COMMAND.get())
     family_filename = _family_template_filename(command_key, filename)

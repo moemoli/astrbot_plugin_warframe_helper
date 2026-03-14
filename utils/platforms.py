@@ -9,7 +9,7 @@ from ..helpers import eta_key_zh, parse_platform
 
 def worldstate_platform_from_tokens(tokens: list[str]) -> Platform:
     p = parse_platform(tokens, WORLDSTATE_PLATFORM_ALIASES, default="pc")
-    if p in {"pc", "ps4", "xb1", "swi"}:
+    if p in {"pc", "cn", "ps4", "xb1", "swi"}:
         return cast(Platform, p)
     return "pc"
 

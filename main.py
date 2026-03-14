@@ -2,6 +2,7 @@ import asyncio
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 from astrbot.api import logger
@@ -9,6 +10,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star
 from astrbot.core.star.filter.command import GreedyStr
+from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from .clients.drop_data_client import DropDataClient
 from .clients.market_client import WarframeMarketClient
@@ -25,7 +27,10 @@ from .mappers.riven_stats_mapping import WarframeRivenStatMapper
 from .mappers.term_mapping import WarframeTermMapper
 from .renderers.html_snapshot import start_playwright_runtime_prepare
 from .renderers.template_loader import (
+    has_render_template_name,
+    list_available_render_template_names,
     set_current_render_command,
+    set_current_render_template_name,
     set_render_template_name,
 )
 from .renderers.worldstate_render import (
@@ -40,11 +45,30 @@ from .services.subscriptions import SubscriptionService
 
 QQ_OFFICIAL_WEBHOOK_PAGER_TEMPLATE_ID_DEFAULT = ""
 _DEBUG_LOGGING_ENABLED = False
+_RENDER_TEMPLATE_RESOLVER: Callable[[AstrMessageEvent], str | None] | None = None
 
 
 def set_debug_logging_enabled(enabled: bool) -> None:
     global _DEBUG_LOGGING_ENABLED
     _DEBUG_LOGGING_ENABLED = bool(enabled)
+
+
+def set_render_template_resolver(
+    resolver: Callable[[AstrMessageEvent], str | None] | None,
+) -> None:
+    global _RENDER_TEMPLATE_RESOLVER
+    _RENDER_TEMPLATE_RESOLVER = resolver
+
+
+def _apply_render_template_for_event(event: AstrMessageEvent) -> None:
+    name: str | None = None
+    resolver = _RENDER_TEMPLATE_RESOLVER
+    if resolver:
+        try:
+            name = resolver(event)
+        except Exception:
+            name = None
+    set_current_render_template_name(name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +81,8 @@ class QQWebhookConfig:
 
 
 def _safe_disable_llm(event: AstrMessageEvent, *, reason: str) -> None:
+    _apply_render_template_for_event(event)
+
     if reason.startswith("/"):
         set_current_render_command(reason)
 
@@ -196,6 +222,50 @@ def _convert_wm_args_to_wmr(raw_args: str) -> str | None:
     return " ".join(converted)
 
 
+def _clear_plugin_image_cache() -> dict[str, int | str]:
+    removed = 0
+    failed = 0
+
+    try:
+        temp_dir = Path(get_astrbot_temp_path())
+    except Exception as exc:
+        return {
+            "removed": 0,
+            "failed": 0,
+            "message": f"无法获取临时目录: {exc!s}",
+        }
+
+    if not temp_dir.exists() or not temp_dir.is_dir():
+        return {"removed": 0, "failed": 0, "message": "临时目录不存在"}
+
+    def should_remove(name: str) -> bool:
+        n = (name or "").strip().lower()
+        if not n:
+            return False
+        if n == "wf_helper_blank_1x1.png":
+            return True
+        if n.startswith("wf_worldstate_") and n.endswith(".png"):
+            return True
+        if n.startswith("wmr_") and n.endswith(".png"):
+            return True
+        if n.startswith("wm_") and n.endswith(".png"):
+            return True
+        return False
+
+    for child in temp_dir.iterdir():
+        if not child.is_file():
+            continue
+        if not should_remove(child.name):
+            continue
+        try:
+            child.unlink(missing_ok=True)
+            removed += 1
+        except Exception:
+            failed += 1
+
+    return {"removed": removed, "failed": failed, "message": "ok"}
+
+
 class QQResultDispatcher:
     def __init__(self, qq_pager: QQOfficialWebhookPager) -> None:
         self._qq_pager = qq_pager
@@ -296,7 +366,10 @@ class WarframeHelperPlugin(Star):
         super().__init__(context, config)
         self.config = config
 
-        set_render_template_name(_parse_render_template_name(self.config))
+        self._default_render_template = _parse_render_template_name(self.config)
+        set_render_template_name(self._default_render_template)
+        self._session_render_templates: dict[str, str] = {}
+        set_render_template_resolver(self._resolve_session_template)
         self._enable_no_prefix_commands = _parse_enable_no_prefix_commands(self.config)
 
         _apply_proxy_config(self.config)
@@ -354,6 +427,12 @@ class WarframeHelperPlugin(Star):
             worldstate_client=self.worldstate_client,
             config=self.config,
         )
+
+    def _resolve_session_template(self, event: AstrMessageEvent) -> str | None:
+        sid = str(getattr(event, "session_id", "") or "").strip()
+        if not sid:
+            return None
+        return self._session_render_templates.get(sid)
 
     async def initialize(self):
         """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
@@ -450,10 +529,13 @@ class WarframeHelperPlugin(Star):
 
     def _no_prefix_handler_map(self) -> dict[str, Callable[..., Any]]:
         return {
-            "wf": self.wf_help,
-            "wf帮助": self.wf_help,
+            "wf": self.wf_help_cmd,
+            "wf帮助": self.wf_help_alias,
             "wfmap": self.wfmap,
             "wf映射": self.wfmap,
+            "模板": self.wf_template,
+            "wf模板": self.wf_template,
+            "渲染模板": self.wf_template,
             "wm": self.wm,
             "wmr": self.wmr,
             "wfp": self.wf_page,
@@ -842,35 +924,52 @@ class WarframeHelperPlugin(Star):
             return
         yield result
 
-    @filter.command("wf", alias={"wf帮助"})
-    async def wf_help(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
-        """Show plugin help.
-        Usage:
-        - /wf
-        - /wf help
-        - /wf 帮助
-        """
-        _safe_disable_llm(event, reason="/wf")
+    @filter.command_group("wf")
+    def wf(self):
+        pass
 
-        sub = str(args).strip().lower()
-        if sub in {"reset", "刷新缓存", "重置缓存"}:
-            if not event.is_admin():
-                yield event.plain_result("/wf reset 仅限 AstrBot 管理员使用。")
-                return
+    @wf.command("help", alias={"帮助", "h"})
+    async def wf_help_cmd(self, event: AstrMessageEvent):
+        _safe_disable_llm(event, reason="/wf help")
+        result = await self._handle_wf_help(event)
+        yield result
 
-            reset_result = self.worldstate_client.reset_public_export_cache(
-                clear_worldstate_cache=True,
-                remove_disk=True,
-            )
-            ws_n = int(reset_result.get("worldstate_entries", 0))
-            mem_n = int(reset_result.get("memory_entries", 0))
-            disk_ok = bool(reset_result.get("disk_cleared", False))
-            disk_msg = "已清理" if disk_ok else "无需清理或清理失败"
-            yield event.plain_result(
-                "PublicExport 缓存已重置："
-                f"内存条目 {mem_n}，worldstate 缓存条目 {ws_n}，磁盘缓存 {disk_msg}。"
-            )
-            return
+    @wf.command("refresh", alias={"reset", "刷新", "刷新缓存", "重置缓存"})
+    async def wf_refresh_cmd(self, event: AstrMessageEvent):
+        _safe_disable_llm(event, reason="/wf refresh")
+        result = await self._handle_wf_refresh(event)
+        yield result
+
+    @filter.command("wf帮助")
+    async def wf_help_alias(self, event: AstrMessageEvent):
+        _safe_disable_llm(event, reason="/wf 帮助")
+        result = await self._handle_wf_help(event)
+        yield result
+
+    async def _handle_wf_refresh(self, event: AstrMessageEvent):
+        if not event.is_admin():
+            return event.plain_result("/wf refresh 仅限 astradmin 使用。")
+
+        reset_result = self.worldstate_client.reset_public_export_cache(
+            clear_worldstate_cache=True,
+            remove_disk=True,
+        )
+        ws_n = int(reset_result.get("worldstate_entries", 0))
+        mem_n = int(reset_result.get("memory_entries", 0))
+        disk_ok = bool(reset_result.get("disk_cleared", False))
+        disk_msg = "已清理" if disk_ok else "无需清理或清理失败"
+
+        image_result = _clear_plugin_image_cache()
+        img_removed = int(image_result.get("removed", 0))
+        img_failed = int(image_result.get("failed", 0))
+        return event.plain_result(
+            "/wf refresh 完成："
+            f"PublicExport 内存条目 {mem_n}，worldstate 缓存条目 {ws_n}，磁盘缓存 {disk_msg}；"
+            f"图片缓存已删除 {img_removed} 个"
+            + (f"（失败 {img_failed} 个）" if img_failed > 0 else "。")
+        )
+
+    async def _handle_wf_help(self, event: AstrMessageEvent):
 
         rows = [
             WorldstateRow(
@@ -911,11 +1010,9 @@ class WarframeHelperPlugin(Star):
             ),
             WorldstateRow(
                 title="工具",
-                subtitle=("/wfmap（别名：wf映射）/wf（本帮助；别名：wf帮助）"),
-            ),
-            WorldstateRow(
-                title="示例",
-                subtitle="/helloworld",
+                subtitle=(
+                    "/wfmap（别名：wf映射）/模板（别名：wf模板、渲染模板）/wf refresh（仅astradmin）/wf（本帮助；别名：wf帮助）"
+                ),
             ),
         ]
 
@@ -933,13 +1030,48 @@ class WarframeHelperPlugin(Star):
                 title="WF 帮助",
                 kind="/wf",
             ):
-                yield event.make_result().stop_event()
-                return
-            yield result
-            return
+                return event.make_result().stop_event()
+            return result
 
         # Fallback: in case image rendering fails.
-        yield event.plain_result("/wf 帮助图片渲染失败，请稍后重试。")
+        return event.plain_result("/wf 帮助图片渲染失败，请稍后重试。")
+
+    @filter.command("模板", alias={"wf模板", "渲染模板", "wft"})
+    async def wf_template(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
+        """切换当前会话的渲染模板。"""
+        _safe_disable_llm(event, reason="/模板")
+
+        sid = str(getattr(event, "session_id", "") or "").strip()
+        raw = str(args or "").strip()
+        available = list_available_render_template_names()
+        available_text = "、".join(available)
+
+        current = (
+            self._session_render_templates.get(sid) or self._default_render_template
+        )
+
+        if not raw or raw.lower() in {"list", "ls", "列表"}:
+            yield event.plain_result(
+                "渲染模板设置\n"
+                f"- 当前会话模板：{current}\n"
+                f"- 可用模板：{available_text}\n"
+                "- 用法：/模板 <名称>（恢复默认：/模板 默认）"
+            )
+            return
+
+        if raw.lower() in {"default", "reset", "clear"} or raw in {"默认", "重置"}:
+            if sid:
+                self._session_render_templates.pop(sid, None)
+            yield event.plain_result(f"已恢复默认模板：{self._default_render_template}")
+            return
+
+        if not has_render_template_name(raw):
+            yield event.plain_result(f"模板不存在：{raw}\n可用模板：{available_text}")
+            return
+
+        if sid:
+            self._session_render_templates[sid] = raw
+        yield event.plain_result(f"当前会话渲染模板已切换为：{raw}")
 
     @filter.command("wm")
     async def wm(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
@@ -951,6 +1083,8 @@ class WarframeHelperPlugin(Star):
         - /wm 猴p pc 收
         - /wm 猴p pc 收 zh 10
         """
+        _apply_render_template_for_event(event)
+
         raw_args = str(args)
         converted_wmr_args = _convert_wm_args_to_wmr(raw_args)
         if converted_wmr_args is not None:
@@ -1004,6 +1138,8 @@ class WarframeHelperPlugin(Star):
         示例：/wmr 绝路 双暴 负任意 12段 r槽
         语义：武器=绝路，正面=暴击率+暴击伤害，负面任意（但需要有负面），MR>=12，极性=R(zenurik)
         """
+        _apply_render_template_for_event(event)
+
         set_current_render_command("/wmr")
         async for res in cmd_wmr(
             context=self.context,
@@ -1035,6 +1171,8 @@ class WarframeHelperPlugin(Star):
 
         Designed to be used by QQ official webhook "command" buttons.
         """
+        _apply_render_template_for_event(event)
+
         async for res in cmd_wfp(
             event=event,
             raw_args=str(args),

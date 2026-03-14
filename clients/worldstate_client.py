@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import time
@@ -8,12 +9,15 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
+import aiohttp
+
 from astrbot.api import logger
 
-from ..http_utils import fetch_bytes, fetch_json
+from ..http_utils import fetch_bytes
+from ..utils.wegame_sign import build_signed_wegame_url
 from .public_export_client import PublicExportClient
 
-Platform = Literal["pc", "ps4", "xb1", "swi"]
+Platform = Literal["pc", "cn", "ps4", "xb1", "swi"]
 
 
 OFFICIAL_WORLDSTATE_URLS: list[str] = [
@@ -42,6 +46,19 @@ WARFRAMESTAT_PROXY_BASES: list[str] = [
 ]
 
 
+ARBITRATION_TEXT_URLS: list[str] = [
+    "https://browse.wf/arbys.txt",
+    "https://r.jina.ai/http://browse.wf/arbys.txt",
+]
+
+
+CN_WORLDSTATE_BASE_URL = (
+    "https://www.wegame.com.cn/api/act/index.php/"
+    "xjzj/xjzj20220330/index/ajax_get_worldState"
+)
+CN_WORLDSTATE_PAGE_URL = "https://www.wegame.com.cn/act/xjzj/xjzj20220330/index.html"
+
+
 def _append_platform_query(url: str, platform_norm: str) -> str:
     if not platform_norm or platform_norm == "pc":
         return url
@@ -49,8 +66,22 @@ def _append_platform_query(url: str, platform_norm: str) -> str:
     return f"{url}{sep}platform={platform_norm}"
 
 
+def _platform_for_warframestat(
+    platform: Platform,
+) -> Literal["pc", "ps4", "xb1", "swi"]:
+    if platform == "cn":
+        return "pc"
+    return platform
+
+
+def _cn_worldstate_url() -> str:
+    return build_signed_wegame_url(CN_WORLDSTATE_BASE_URL, params=None, method="GET")
+
+
 def _worldstate_urls(platform: Platform) -> list[str]:
     platform_norm = (platform or "pc").strip().lower()
+    if platform_norm == "cn":
+        return [_cn_worldstate_url()]
     urls: list[str] = []
     for u in [*OFFICIAL_WORLDSTATE_URLS, *WORLDSTATE_PROXY_URLS]:
         uu = _append_platform_query(u, platform_norm)
@@ -70,6 +101,52 @@ def _normalize_base_urls(urls: list[str] | None) -> list[str]:
     return out
 
 
+def _is_worldstate_like(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    keys = {
+        "Alerts",
+        "ActiveMissions",
+        "Sorties",
+        "SyndicateMissions",
+        "VoidTraders",
+        "SeasonInfo",
+        "Invasions",
+        "Time",
+        "EarthCycle",
+        "CetusCycle",
+        "CambionCycle",
+        "VallisCycle",
+        "DuviriCycle",
+    }
+    return any(k in payload for k in keys)
+
+
+def _extract_worldstate_payload(payload: Any) -> Any | None:
+    if _is_worldstate_like(payload):
+        return payload
+
+    if not isinstance(payload, dict):
+        return None
+
+    for key in ("data", "worldstate", "worldState"):
+        nested = payload.get(key)
+        if _is_worldstate_like(nested):
+            return nested
+        if isinstance(nested, dict):
+            for sub in ("data", "worldstate", "worldState"):
+                nested2 = nested.get(sub)
+                if _is_worldstate_like(nested2):
+                    return nested2
+
+    # Common shape from dynamic aggregate APIs: { de: {...}, wg: {...} }
+    wg = payload.get("wg")
+    if _is_worldstate_like(wg):
+        return wg
+
+    return None
+
+
 def _warframestat_urls(
     platform: Platform,
     endpoint: str,
@@ -77,7 +154,7 @@ def _warframestat_urls(
     api_bases: list[str] | None = None,
     proxy_bases: list[str] | None = None,
 ) -> list[str]:
-    platform_norm = (platform or "pc").strip().lower() or "pc"
+    platform_norm = _platform_for_warframestat(platform)
     ep = (endpoint or "").strip(" /")
     if not ep:
         return []
@@ -204,7 +281,9 @@ def _normalize_nightwave_description(
         for key in (token, token.lower(), token.title()):
             val = c.get(key)
             if isinstance(val, (int, float)):
-                return str(int(val) if isinstance(val, float) and val.is_integer() else val)
+                return str(
+                    int(val) if isinstance(val, float) and val.is_integer() else val
+                )
             if isinstance(val, str) and val.strip():
                 return val.strip()
         return None
@@ -571,6 +650,7 @@ class WarframeWorldstateClient:
         self._warframestat_proxy_bases = _normalize_base_urls(
             warframestat_proxy_bases
         ) or list(WARFRAMESTAT_PROXY_BASES)
+        self._arbitration_text_urls = list(ARBITRATION_TEXT_URLS)
 
         # Cycle epochs (seconds). Set via env vars if you need to calibrate.
         self._epoch_cetus = _env_epoch("ASTRBOT_WF_CETUS_EPOCH", 0)
@@ -588,6 +668,173 @@ class WarframeWorldstateClient:
             proxy_bases=self._warframestat_proxy_bases,
         )
 
+    def _unwrap_cn_worldstate_payload(self, payload: Any) -> Any | None:
+        if not isinstance(payload, dict):
+            return payload
+
+        status = str(payload.get("status", "")).strip().lower()
+        data = payload.get("data")
+
+        if status in {"1", "ok", "true"}:
+            if isinstance(data, (dict, list)):
+                return data
+            if isinstance(data, str):
+                parsed = _extract_json_from_text(data)
+                return parsed if parsed is not None else data
+            return data
+
+        return None
+
+    def _cn_error_code(self, payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        status = str(payload.get("status", "")).strip().lower()
+        if status in {"1", "ok", "true"}:
+            return None
+        data = payload.get("data")
+        if data is None:
+            return None
+        return str(data).strip()
+
+    async def _fetch_cn_worldstate(self, *, timeout_sec: float) -> Any | None:
+        timeout = aiohttp.ClientTimeout(total=float(timeout_sec))
+        page_headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://www.wegame.com.cn/",
+        }
+        api_headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": CN_WORLDSTATE_PAGE_URL,
+            "Origin": "https://www.wegame.com.cn",
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json, text/plain, */*",
+        }
+
+        last_payload: Any | None = None
+
+        for _ in range(2):
+            async with aiohttp.ClientSession(
+                timeout=timeout, trust_env=True
+            ) as session:
+                try:
+                    async with session.get(
+                        CN_WORLDSTATE_PAGE_URL, headers=page_headers
+                    ):
+                        pass
+                except Exception:
+                    pass
+
+                signed_url = build_signed_wegame_url(
+                    CN_WORLDSTATE_BASE_URL,
+                    params=None,
+                    method="GET",
+                    # Keep `t` as current local 10-digit timestamp.
+                    server_time=None,
+                )
+
+                try:
+                    async with session.get(signed_url, headers=api_headers) as r:
+                        if r.status != 200:
+                            last_payload = None
+                            continue
+                        text = await r.text(encoding="utf-8", errors="replace")
+                except Exception:
+                    last_payload = None
+                    continue
+
+            try:
+                payload: Any = json.loads(text)
+            except Exception:
+                payload = _extract_json_from_text(text)
+
+            last_payload = payload
+            code = self._cn_error_code(payload)
+            if code in {"-13", "-16"}:
+                await asyncio.sleep(0.2)
+                continue
+            return payload
+
+        return last_payload
+
+    async def _fetch_cn_worldstate_by_browser(
+        self, *, timeout_sec: float
+    ) -> Any | None:
+        try:
+            from playwright.async_api import async_playwright
+        except Exception as exc:
+            logger.info(f"cn browser capture skipped: playwright unavailable: {exc!s}")
+            return None
+
+        timeout_ms = max(3000, int(float(timeout_sec) * 1000))
+        request_hint = "/ajax_get_worldState"
+
+        try:
+            async with async_playwright() as runtime:
+                browser = await runtime.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--disable-software-rasterizer",
+                        "--no-zygote",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                    ],
+                    timeout=timeout_ms,
+                )
+                try:
+                    context = await browser.new_context(
+                        user_agent=(
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/122.0.0.0 Safari/537.36"
+                        ),
+                        locale="zh-CN",
+                        viewport={"width": 1366, "height": 900},
+                    )
+                    page = await context.new_page()
+                    try:
+                        await page.goto(
+                            CN_WORLDSTATE_PAGE_URL,
+                            wait_until="domcontentloaded",
+                            timeout=timeout_ms,
+                        )
+                        await page.wait_for_timeout(300)
+                        await page.reload(
+                            wait_until="domcontentloaded",
+                            timeout=timeout_ms,
+                        )
+                        try:
+                            await page.wait_for_load_state(
+                                "networkidle",
+                                timeout=min(timeout_ms, 5000),
+                            )
+                        except Exception:
+                            pass
+
+                        response = await page.wait_for_response(
+                            lambda r: request_hint in r.url,
+                            timeout=min(timeout_ms, 6000),
+                        )
+                        text = await response.text()
+                    finally:
+                        await page.close()
+                        await context.close()
+                finally:
+                    await browser.close()
+        except Exception as exc:
+            logger.info(f"cn browser capture failed: {exc!s}")
+            return None
+
+        try:
+            payload: Any = json.loads(text)
+        except Exception:
+            payload = _extract_json_from_text(text)
+
+        return payload
+
     def _cache_get(self, key: str) -> Any | None:
         rec = self._cache.get(key)
         if not rec:
@@ -601,7 +848,11 @@ class WarframeWorldstateClient:
         self._cache[key] = (time.time(), payload)
 
     async def _fetch_json_resilient(
-        self, urls: list[str], *, timeout_sec: float | None = None
+        self,
+        urls: list[str],
+        *,
+        timeout_sec: float | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Any | None:
         effective_timeout = (
             float(timeout_sec)
@@ -611,7 +862,7 @@ class WarframeWorldstateClient:
 
         # Single network pass: decode strict JSON first, then try loose extraction.
         # This avoids duplicated URL retries when upstream returns non-standard JSON text.
-        raw = await fetch_bytes(urls, timeout_sec=effective_timeout)
+        raw = await fetch_bytes(urls, timeout_sec=effective_timeout, headers=headers)
         if raw is None:
             return None
         text = raw.decode("utf-8", "replace")
@@ -661,13 +912,62 @@ class WarframeWorldstateClient:
             else self._http_timeout_sec
         )
 
-        data = await self._fetch_json_resilient(
-            _worldstate_urls(platform_norm), timeout_sec=effective_timeout
+        urls = _worldstate_urls(platform_norm)
+        cn_headers = (
+            {
+                "Referer": "https://www.wegame.com.cn/act/xjzj/xjzj20220330/index.html",
+                "Origin": "https://www.wegame.com.cn",
+            }
+            if platform_norm == "cn"
+            else None
         )
+        if platform_norm == "cn":
+            data = await self._fetch_cn_worldstate(timeout_sec=effective_timeout)
+            if data is None:
+                data = await self._fetch_json_resilient(
+                    urls,
+                    timeout_sec=effective_timeout,
+                    headers=cn_headers,
+                )
+
+            if (
+                _extract_worldstate_payload(self._unwrap_cn_worldstate_payload(data))
+                is None
+            ):
+                browser_data = await self._fetch_cn_worldstate_by_browser(
+                    timeout_sec=effective_timeout
+                )
+                if browser_data is not None:
+                    data = browser_data
+        else:
+            data = await self._fetch_json_resilient(
+                urls,
+                timeout_sec=effective_timeout,
+                headers=cn_headers,
+            )
+        if platform_norm == "cn":
+            unwrapped = self._unwrap_cn_worldstate_payload(data)
+            extracted = _extract_worldstate_payload(unwrapped)
+            if extracted is not None:
+                data = extracted
+            else:
+                extracted = _extract_worldstate_payload(data)
+                if extracted is not None:
+                    data = extracted
+
+            if not _is_worldstate_like(data):
+                logger.warning(
+                    "cn worldstate payload invalid/unsupported, fallback to official pc"
+                )
+                urls = _worldstate_urls("pc")
+                data = await self._fetch_json_resilient(
+                    urls,
+                    timeout_sec=effective_timeout,
+                )
         if data is None:
             logger.warning(
                 f"worldstate fetch failed for platform={platform_norm} "
-                f"timeout={effective_timeout:.1f}s urls={_worldstate_urls(platform_norm)[:4]}"
+                f"timeout={effective_timeout:.1f}s urls={urls[:4]}"
             )
             return None
 
@@ -1252,10 +1552,81 @@ class WarframeWorldstateClient:
             inventory=tuple(inv),
         )
 
+    async def _fetch_arbitration_from_schedule_text(
+        self, *, language: str
+    ) -> ArbitrationInfo | None:
+        if not self._arbitration_text_urls:
+            return None
+
+        raw = await fetch_bytes(
+            self._arbitration_text_urls,
+            timeout_sec=min(self._http_timeout_sec, 12.0),
+            headers={
+                "Referer": "https://browse.wf/",
+                "Origin": "https://browse.wf",
+            },
+        )
+        if raw is None:
+            return None
+
+        text = raw.decode("utf-8", "replace")
+        entries: list[tuple[int, str]] = []
+        for line in text.splitlines():
+            m = re.match(
+                r"^\s*(\d{9,12})\s*[,，]\s*([A-Za-z]+Node\d+)\s*$",
+                str(line or "").strip(),
+            )
+            if not m:
+                continue
+            try:
+                ts = int(m.group(1))
+            except Exception:
+                continue
+            node_key = str(m.group(2) or "").strip()
+            if not node_key:
+                continue
+            entries.append((ts, node_key))
+
+        if not entries:
+            return None
+
+        entries.sort(key=lambda x: x[0])
+        now = int(time.time())
+
+        current_node = entries[0][1]
+        expiry_dt: datetime | None = None
+
+        if now < entries[0][0]:
+            expiry_dt = datetime.fromtimestamp(entries[0][0], tz=timezone.utc)
+        else:
+            for idx in range(len(entries) - 1):
+                curr_ts, curr_node = entries[idx]
+                next_ts, _ = entries[idx + 1]
+                if curr_ts <= now < next_ts:
+                    current_node = curr_node
+                    expiry_dt = datetime.fromtimestamp(next_ts, tz=timezone.utc)
+                    break
+            else:
+                current_node = entries[-1][1]
+
+        node_name = await self._public_export.translate_sol_node(
+            current_node,
+            language=language,
+        )
+        if not node_name:
+            node_name = await self._node_name(current_node, language=language)
+
+        return ArbitrationInfo(
+            node=node_name or current_node,
+            mission_type="仲裁",
+            enemy=None,
+            eta=_format_eta_from_dt(expiry_dt),
+        )
+
     async def fetch_arbitration(
         self, *, platform: Platform = "pc", language: str = "zh"
     ) -> ArbitrationInfo | None:
-        cache_key = f"warframestat:arbitration:{platform}:{language}"
+        cache_key = f"arbitration:{platform}:{language}"
         cached = self._cache_get(cache_key)
         if isinstance(cached, ArbitrationInfo):
             return cached
@@ -1263,27 +1634,39 @@ class WarframeWorldstateClient:
         data = await self._fetch_json_resilient(
             self._warframestat_urls(platform, "arbitration")
         )
-        if not isinstance(data, dict):
-            if not self._warned_arbitration:
-                logger.info("arbitration data unavailable from fallback source")
-                self._warned_arbitration = True
-            return None
+        if isinstance(data, dict):
+            node_raw = data.get("node") if isinstance(data.get("node"), str) else None
+            if node_raw:
+                mission_raw = (
+                    data.get("type") if isinstance(data.get("type"), str) else None
+                )
+                enemy_raw = (
+                    data.get("enemy") if isinstance(data.get("enemy"), str) else None
+                )
+                expiry = _parse_any_datetime(data.get("expiry") or data.get("endDate"))
 
-        node_raw = data.get("node") if isinstance(data.get("node"), str) else None
-        if not node_raw:
-            return None
-        mission_raw = data.get("type") if isinstance(data.get("type"), str) else None
-        enemy_raw = data.get("enemy") if isinstance(data.get("enemy"), str) else None
-        expiry = _parse_any_datetime(data.get("expiry") or data.get("endDate"))
+                info = ArbitrationInfo(
+                    node=await self._node_name(node_raw, language=language),
+                    mission_type=(mission_raw or "?").strip() or "?",
+                    enemy=self._faction_name_cn(enemy_raw),
+                    eta=_format_eta_from_dt(expiry),
+                )
+                self._cache_put(cache_key, info)
+                return info
 
-        info = ArbitrationInfo(
-            node=await self._node_name(node_raw, language=language),
-            mission_type=(mission_raw or "?").strip() or "?",
-            enemy=self._faction_name_cn(enemy_raw),
-            eta=_format_eta_from_dt(expiry),
+        schedule_info = await self._fetch_arbitration_from_schedule_text(
+            language=language
         )
-        self._cache_put(cache_key, info)
-        return info
+        if schedule_info is not None:
+            self._cache_put(cache_key, schedule_info)
+            return schedule_info
+
+        if not self._warned_arbitration:
+            logger.info(
+                "arbitration data unavailable from warframestat and schedule text source"
+            )
+            self._warned_arbitration = True
+        return None
 
     async def fetch_nightwave(
         self, *, platform: Platform = "pc", language: str = "zh"
@@ -1351,7 +1734,9 @@ class WarframeWorldstateClient:
                 else:
                     # Degraded path: avoid expensive per-item localization network calls.
                     # Keep command latency bounded under poor connectivity.
-                    raw_title = c.get("Title") if isinstance(c.get("Title"), str) else None
+                    raw_title = (
+                        c.get("Title") if isinstance(c.get("Title"), str) else None
+                    )
                     if isinstance(raw_title, str) and raw_title.strip():
                         title = raw_title.strip()
                     raw_desc = (

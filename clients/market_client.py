@@ -165,9 +165,7 @@ class WarframeMarketClient:
         self._evict_cache(self._orders_cache, max_entries=self._orders_cache_max)
         return orders
 
-    async def fetch_orders_by_item_id(
-        self, item_id: str
-    ) -> list[MarketOrder] | None:
+    async def fetch_orders_by_item_id(self, item_id: str) -> list[MarketOrder] | None:
         """Backward-compatible wrapper.
 
         WFM v2 `/orders/item/{...}` expects item slug, not item id.

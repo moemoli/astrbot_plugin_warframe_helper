@@ -20,6 +20,26 @@
 - `/执行官猎杀`
 - `/钢铁奖励`
 
+> 世界状态类指令支持平台参数（如 `pc / ps4 / xb1 / swi / cn`），例如：`/裂缝 cn`、`/突击 国服`。
+
+### 国服数据回退（参考 hole-wf-api 思路）
+
+当 WeGame 直连接口出现 `-13/-16` 时，插件会按顺序尝试：
+
+1. 签名 URL 直连
+2. Playwright 浏览器抓取页面中的 `/ajax_get_worldState` 响应
+3. 你配置的第三方备用 URL / Base URL（可对接自建 hole-wf-api）
+4. 最后回退到国际服 PC worldstate，避免指令硬失败
+
+以上回退链路已内置默认行为。
+
+### 仲裁数据源（按 hole-wf-api 补齐）
+
+`/仲裁` 现在采用多源策略：
+
+1. 优先 `warframestat` 的 `/arbitration` JSON
+2. 回退 `browse.wf/arbys.txt`（时间戳 + 节点）并自动映射节点名
+
 ### 订阅提醒
 
 - `/订阅 <条件> [次数|永久]`

@@ -8,7 +8,11 @@ from ..constants import RIVEN_STAT_CN
 from ..constants import market_status_to_cn, normalize_market_status
 from ..http_utils import fetch_bytes
 from ..mappers.riven_mapping import RivenWeapon
-from .html_snapshot import image_bytes_to_data_uri, render_html_to_png_file, svg_text_to_data_uri
+from .html_snapshot import (
+    image_bytes_to_data_uri,
+    render_html_to_png_file,
+    svg_text_to_data_uri,
+)
 from .template_loader import load_html_template
 
 WARFRAME_MARKET_ASSETS_BASE_URL = "https://warframe.market/static/assets/"

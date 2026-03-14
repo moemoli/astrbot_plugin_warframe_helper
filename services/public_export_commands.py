@@ -17,7 +17,9 @@ async def _localized_title(
     language: str = "zh",
 ) -> str:
     raw_name = str(name) if isinstance(name, str) and name else ""
-    raw_unique = str(unique_name) if isinstance(unique_name, str) and unique_name else ""
+    raw_unique = (
+        str(unique_name) if isinstance(unique_name, str) and unique_name else ""
+    )
 
     if raw_unique:
         mapped = await public_export_client.translate_unique_name_loose(

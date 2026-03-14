@@ -734,6 +734,27 @@ class PublicExportClient:
 
         return self._localize_crew_battle_label(node_unique, None)
 
+    async def translate_sol_node(
+        self, node_key: str, *, language: str = "zh"
+    ) -> str | None:
+        key = (node_key or "").strip()
+        if not key:
+            return None
+
+        mapping = await self._get_solnodes_map(language=language)
+        direct = mapping.get(key)
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+
+        lowered = key.lower()
+        for k, v in mapping.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                continue
+            if k.lower() == lowered and v.strip():
+                return v.strip()
+
+        return None
+
     async def get_nightwave_challenge_map(
         self, *, language: str = "zh"
     ) -> dict[str, tuple[str, int | None, str | None]]:
@@ -767,7 +788,9 @@ class PublicExportClient:
                         out[uniq] = (
                             name,
                             standing if isinstance(standing, int) else None,
-                            description.strip() if isinstance(description, str) else None,
+                            description.strip()
+                            if isinstance(description, str)
+                            else None,
                         )
 
         self._mem_nightwave_map[lang] = out

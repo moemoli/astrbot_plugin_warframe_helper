@@ -17,6 +17,9 @@ MARKET_PLATFORM_ALIASES: dict[str, str] = {
 WORLDSTATE_PLATFORM_ALIASES: dict[str, str] = {
     "pc": "pc",
     "电脑": "pc",
+    "cn": "cn",
+    "-cn": "cn",
+    "国服": "cn",
     "ps": "ps4",
     "ps4": "ps4",
     "ps5": "ps4",
