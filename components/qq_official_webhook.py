@@ -71,20 +71,34 @@ class QQOfficialWebhookPager:
                 {
                     "key": "title",
                     "values": [
-                        self._sanitize_template_text(str(title).strip() or "Warframe 助手", max_len=64)
+                        self._sanitize_template_text(
+                            str(title).strip() or "Warframe 助手", max_len=64
+                        )
                     ],
                 },
                 {
                     "key": "kind",
-                    "values": [self._sanitize_template_text(str(kind).strip() or "-", max_len=64)],
+                    "values": [
+                        self._sanitize_template_text(
+                            str(kind).strip() or "-", max_len=64
+                        )
+                    ],
                 },
                 {
                     "key": "page",
-                    "values": [self._sanitize_template_text(str(page).strip() or "-", max_len=32)],
+                    "values": [
+                        self._sanitize_template_text(
+                            str(page).strip() or "-", max_len=32
+                        )
+                    ],
                 },
                 {
                     "key": "hint",
-                    "values": [self._sanitize_template_text(str(hint).strip() or " ", max_len=1200)],
+                    "values": [
+                        self._sanitize_template_text(
+                            str(hint).strip() or " ", max_len=1200
+                        )
+                    ],
                 },
                 {"key": "image", "values": [str(image_url).strip() or " "]},
                 {"key": "image_w", "values": [str(max(1, int(image_width)))]},

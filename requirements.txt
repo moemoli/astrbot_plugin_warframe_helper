@@ -4,5 +4,5 @@
 aiohttp
 Pillow
 playwright
-websockets>=15.0.1
+qq-botpy
 Jinja2
