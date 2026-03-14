@@ -2,26 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import html as html_lib
 import mimetypes
 import os
-import platform
-import re
 import shutil
-import stat
-import subprocess
-import threading
-import textwrap
+import sys
 import uuid
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
-
-from PIL import Image, ImageDraw, ImageFont
 
 
 def _env_int(name: str, default: int) -> int:
@@ -34,231 +24,122 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
-_HTML_RENDER_WORKERS = max(1, min(4, _env_int("WF_HTML_RENDER_WORKERS", 2)))
 _HTML_RENDER_CONNECT_TIMEOUT_SEC = max(1, _env_int("WF_HTML_RENDER_CONNECT_TIMEOUT", 4))
 _HTML_RENDER_LAUNCH_TIMEOUT_SEC = max(2, _env_int("WF_HTML_RENDER_LAUNCH_TIMEOUT", 8))
 _HTML_RENDER_PAGE_TIMEOUT_SEC = max(2, _env_int("WF_HTML_RENDER_PAGE_TIMEOUT", 6))
-_HTML_RENDER_EXECUTOR = ThreadPoolExecutor(
-    max_workers=_HTML_RENDER_WORKERS,
-    thread_name_prefix="wf-html-render",
-)
-_CHROMIUM_PREPARE_LOCK = threading.Lock()
-_CHROMIUM_PREPARED = False
-_RENDER_BROWSER_WS_ENDPOINT = ""
-_EMPTY_REMOTE_LOCAL_CHAIN_FAILED = False
-_EMPTY_REMOTE_LOCAL_CHAIN_LOCK = threading.Lock()
-_REMOTE_BROWSER_POOL_LOCK = asyncio.Lock()
-_REMOTE_BROWSER_POOLED: Any | None = None
-_REMOTE_BROWSER_POOLED_ENDPOINT = ""
+
+_PLAYWRIGHT_INSTALL_LOCK = asyncio.Lock()
+_PLAYWRIGHT_INSTALL_DONE = False
 
 
-def set_render_browser_ws_endpoint(endpoint: str | None) -> None:
-    global _RENDER_BROWSER_WS_ENDPOINT, _EMPTY_REMOTE_LOCAL_CHAIN_FAILED
-    _RENDER_BROWSER_WS_ENDPOINT = str(endpoint or "").strip()
-    if _RENDER_BROWSER_WS_ENDPOINT:
-        # With explicit remote browser configured, clear empty-endpoint fail flag.
-        with _EMPTY_REMOTE_LOCAL_CHAIN_LOCK:
-            _EMPTY_REMOTE_LOCAL_CHAIN_FAILED = False
+class _PlaywrightRuntime:
+    def __init__(self) -> None:
+        self._playwright = None
+        self._lock = asyncio.Lock()
 
-
-def has_render_browser_ws_endpoint() -> bool:
-    return bool(str(_RENDER_BROWSER_WS_ENDPOINT or "").strip())
-
-
-async def _invalidate_pooled_remote_browser(*, reason: str) -> None:
-    global _REMOTE_BROWSER_POOLED, _REMOTE_BROWSER_POOLED_ENDPOINT
-    if _REMOTE_BROWSER_POOLED is None:
-        return
-    browser = _REMOTE_BROWSER_POOLED
-    _REMOTE_BROWSER_POOLED = None
-    _REMOTE_BROWSER_POOLED_ENDPOINT = ""
-    try:
-        await browser.disconnect()
-    except Exception:
-        pass
-    logger.warning(f"Remote pooled browser invalidated: {reason}")
-
-
-async def _get_pooled_remote_browser() -> Any | None:
-    global _REMOTE_BROWSER_POOLED, _REMOTE_BROWSER_POOLED_ENDPOINT
-
-    endpoint = str(_RENDER_BROWSER_WS_ENDPOINT or "").strip()
-    if not endpoint:
-        return None
-
-    try:
-        from pyppeteer import connect
-    except Exception as exc:
-        logger.warning(f"pyppeteer import failed for remote pooled browser: {exc!s}")
-        return None
-
-    async with _REMOTE_BROWSER_POOL_LOCK:
-        if _REMOTE_BROWSER_POOLED is not None and _REMOTE_BROWSER_POOLED_ENDPOINT != endpoint:
-            await _invalidate_pooled_remote_browser(reason="endpoint_changed")
-
-        if _REMOTE_BROWSER_POOLED is not None:
+    async def get(self):
+        async with self._lock:
+            if self._playwright is not None:
+                return self._playwright
             try:
-                await asyncio.wait_for(
-                    _REMOTE_BROWSER_POOLED.version(),
-                    timeout=min(2.0, float(_HTML_RENDER_CONNECT_TIMEOUT_SEC)),
-                )
-                return _REMOTE_BROWSER_POOLED
-            except Exception:
-                await _invalidate_pooled_remote_browser(reason="health_check_failed")
+                from playwright.async_api import async_playwright
+            except Exception as exc:
+                logger.warning(f"playwright import failed: {exc!s}")
+                return None
 
+            try:
+                self._playwright = await async_playwright().start()
+                return self._playwright
+            except Exception as exc:
+                logger.warning(f"playwright startup failed: {exc!s}")
+                return None
+
+
+_PLAYWRIGHT_RUNTIME = _PlaywrightRuntime()
+
+
+async def _run_playwright_cli(args: list[str], *, timeout_sec: int) -> tuple[int, str]:
+    cmd = [sys.executable, "-m", "playwright", *args]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+    except Exception as exc:
+        return 1, f"spawn failed: {exc!s}"
+
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=float(timeout_sec))
+    except TimeoutError:
         try:
-            browser = await asyncio.wait_for(
-                connect(browserWSEndpoint=endpoint),
-                timeout=float(_HTML_RENDER_CONNECT_TIMEOUT_SEC),
-            )
-            _REMOTE_BROWSER_POOLED = browser
-            _REMOTE_BROWSER_POOLED_ENDPOINT = endpoint
-            logger.warning(f"Remote pooled browser connected: {endpoint}")
-            return browser
-        except Exception as exc:
-            logger.warning(f"Remote pooled browser connect failed for {endpoint}: {exc!s}")
-            return None
-
-
-async def _render_html_to_png_with_remote_pool(
-    *,
-    html: str,
-    width: int,
-    prefix: str,
-    min_height: int,
-) -> str | None:
-    temp_dir = Path(get_astrbot_temp_path())
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    out_path = temp_dir / f"{prefix}_{uuid.uuid4().hex}.png"
-
-    browser = await _get_pooled_remote_browser()
-    if browser is None:
-        return None
-
-    page = None
-    try:
-        page = await asyncio.wait_for(
-            browser.newPage(),
-            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
-        )
-        await page.setViewport(
-            {
-                "width": max(420, int(width)),
-                "height": max(320, int(min_height)),
-                "deviceScaleFactor": 1.5,
-            }
-        )
-        await asyncio.wait_for(
-            page.setContent(html),
-            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
-        )
-
-        content_height = await asyncio.wait_for(
-            page.evaluate(
-                """
-                () => {
-                  const body = document.body;
-                  const doc = document.documentElement;
-                  return Math.ceil(Math.max(
-                    body ? body.scrollHeight : 0,
-                    body ? body.offsetHeight : 0,
-                    doc ? doc.clientHeight : 0,
-                    doc ? doc.scrollHeight : 0,
-                    doc ? doc.offsetHeight : 0,
-                  ));
-                }
-                """
-            ),
-            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
-        )
-
-        await page.setViewport(
-            {
-                "width": max(420, int(width)),
-                "height": max(320, int(content_height or min_height)),
-                "deviceScaleFactor": 1.5,
-            }
-        )
-
-        await asyncio.wait_for(
-            page.screenshot(
-                {
-                    "path": str(out_path),
-                    "fullPage": True,
-                    "type": "png",
-                }
-            ),
-            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
-        )
-        return str(out_path)
+            proc.kill()
+        except Exception:
+            pass
+        return 124, "timeout"
     except Exception as exc:
-        msg = str(exc).lower()
-        if any(x in msg for x in ["target closed", "session closed", "websocket", "connection"]):
-            await _invalidate_pooled_remote_browser(reason=f"render_failed:{exc!s}")
-        logger.warning(f"Remote pooled browser render failed: {exc!s}")
-        return None
-    finally:
-        if page is not None:
-            try:
-                await page.close()
-            except Exception:
-                pass
+        return 1, f"run failed: {exc!s}"
+
+    text = (out or b"").decode("utf-8", errors="ignore").strip()
+    return int(proc.returncode or 0), text
 
 
-def _mark_empty_remote_local_chain_failed() -> None:
-    global _EMPTY_REMOTE_LOCAL_CHAIN_FAILED
-    with _EMPTY_REMOTE_LOCAL_CHAIN_LOCK:
-        _EMPTY_REMOTE_LOCAL_CHAIN_FAILED = True
+async def ensure_playwright_runtime_ready(*, browser: str | None = None) -> None:
+    global _PLAYWRIGHT_INSTALL_DONE
 
+    if _PLAYWRIGHT_INSTALL_DONE:
+        return
 
-def _is_empty_remote_local_chain_failed() -> bool:
-    with _EMPTY_REMOTE_LOCAL_CHAIN_LOCK:
-        return _EMPTY_REMOTE_LOCAL_CHAIN_FAILED
+    async with _PLAYWRIGHT_INSTALL_LOCK:
+        if _PLAYWRIGHT_INSTALL_DONE:
+            return
 
-
-def _ensure_pyppeteer_home() -> Path:
-    # Keep Chromium/cache in a writable location for container deployments.
-    temp_dir = Path(get_astrbot_temp_path())
-    pyppeteer_home = temp_dir / "pyppeteer"
-    pyppeteer_home.mkdir(parents=True, exist_ok=True)
-    # In Linux containers, pyppeteer often defaults to /root/.local which may
-    # not be stable across deployments. Force a writable plugin-local cache.
-    if platform.system().lower() == "linux":
-        os.environ["PYPPETEER_HOME"] = str(pyppeteer_home)
-    else:
-        os.environ.setdefault("PYPPETEER_HOME", str(pyppeteer_home))
-    return pyppeteer_home
-
-
-def _detect_missing_shared_libs(executable_path: str | None) -> list[str]:
-    if platform.system().lower() != "linux":
-        return []
-    p = str(executable_path or "").strip()
-    if not p or not Path(p).exists():
-        return []
-    try:
-        proc = subprocess.run(
-            ["ldd", p],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=8,
+        target_browser = (
+            str(browser or os.environ.get("WF_PLAYWRIGHT_BROWSER") or "chromium")
+            .strip()
+            .lower()
         )
-        text = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        missing: list[str] = []
-        for line in text.splitlines():
-            s = line.strip()
-            if "=> not found" not in s:
-                continue
-            lib = s.split("=>", 1)[0].strip()
-            if lib and lib not in missing:
-                missing.append(lib)
-        return missing
-    except Exception:
-        return []
+        if target_browser not in {"chromium", "firefox", "webkit"}:
+            target_browser = "chromium"
+
+        install_deps_timeout = max(
+            60, _env_int("WF_PLAYWRIGHT_INSTALL_DEPS_TIMEOUT", 600)
+        )
+        install_timeout = max(60, _env_int("WF_PLAYWRIGHT_INSTALL_TIMEOUT", 600))
+
+        rc_deps, out_deps = await _run_playwright_cli(
+            ["install-deps", target_browser],
+            timeout_sec=install_deps_timeout,
+        )
+        if rc_deps != 0:
+            # Windows/macOS often don't require or support install-deps; keep startup non-blocking.
+            logger.warning(
+                "playwright install-deps failed/skipped "
+                f"(code={rc_deps}, browser={target_browser}): {out_deps[-300:]}"
+            )
+        else:
+            logger.info(f"playwright install-deps success: {target_browser}")
+
+        rc_install, out_install = await _run_playwright_cli(
+            ["install", target_browser],
+            timeout_sec=install_timeout,
+        )
+        if rc_install != 0:
+            logger.warning(
+                "playwright install failed "
+                f"(code={rc_install}, browser={target_browser}): {out_install[-300:]}"
+            )
+            return
+
+        logger.info(f"playwright install success: {target_browser}")
+        _PLAYWRIGHT_INSTALL_DONE = True
 
 
-def image_bytes_to_data_uri(image_bytes: bytes | None, *, filename: str = "image.png") -> str | None:
+def image_bytes_to_data_uri(
+    image_bytes: bytes | None,
+    *,
+    filename: str = "image.png",
+) -> str | None:
     if not image_bytes:
         return None
 
@@ -274,7 +155,6 @@ def svg_text_to_data_uri(svg_text: str) -> str:
 
 
 def _find_browser_executable() -> str | None:
-    # Prefer user-provided path, then common install paths and PATH lookup.
     custom = str(os.environ.get("WF_HTML_RENDER_BROWSER") or "").strip()
     if custom and Path(custom).exists():
         return custom
@@ -324,25 +204,7 @@ def _find_browser_executable() -> str | None:
         ),
     ]
 
-    if platform.system().lower() == "linux":
-        candidates.extend(
-            [
-                "/usr/bin/chromium",
-                "/usr/bin/chromium-browser",
-                "/usr/bin/google-chrome",
-                "/usr/bin/google-chrome-stable",
-                "/opt/google/chrome/chrome",
-            ]
-        )
-
-    for name in (
-        "msedge",
-        "msedge.exe",
-        "chrome",
-        "chrome.exe",
-        "chromium",
-        "chromium-browser",
-    ):
+    for name in ("msedge", "msedge.exe", "chrome", "chrome.exe"):
         found = shutil.which(name)
         if found:
             candidates.append(found)
@@ -358,137 +220,59 @@ def _find_browser_executable() -> str | None:
     return None
 
 
-def _downloaded_chromium_executable() -> str | None:
-    try:
-        _ensure_pyppeteer_home()
-        from pyppeteer import chromium_downloader as cd
-
-        exe: Any = cd.chromium_executable
-        path = str(exe() if callable(exe) else exe).strip()
-        if path and Path(path).exists():
-            return path
-    except Exception:
-        return None
-    return None
-
-
-def _looks_like_downloaded_chromium(path: str) -> bool:
-    p = (path or "").lower()
-    return "pyppeteer" in p and "local-chromium" in p
-
-
-def _ensure_executable_permission(path: str | None) -> None:
-    if not path:
-        return
-    try:
-        p = Path(path)
-        if not p.exists():
-            return
-        mode = p.stat().st_mode
-        p.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    except Exception:
-        return
-
-
-def _prepare_chromium_if_needed() -> bool:
-    global _CHROMIUM_PREPARED
-
-    if _CHROMIUM_PREPARED:
-        return True
-
-    with _CHROMIUM_PREPARE_LOCK:
-        if _CHROMIUM_PREPARED:
-            return True
-
-        try:
-            _ensure_pyppeteer_home()
-            from pyppeteer import chromium_downloader as cd
-
-            if not cd.check_chromium():
-                logger.warning(
-                    "Local browser executable not found, trying pyppeteer Chromium download..."
-                )
-                cd.download_chromium()
-
-            if cd.check_chromium():
-                _ensure_executable_permission(_downloaded_chromium_executable())
-                _CHROMIUM_PREPARED = True
-                return True
-
-            logger.warning(
-                "Chromium download did not provide a usable executable."
-            )
-            return False
-        except Exception as exc:
-            logger.warning(f"Chromium download failed: {exc!s}")
-            return False
-
-
-def _refresh_downloaded_chromium() -> str | None:
-    # Redownload once if existing downloaded binary is unusable.
-    with _CHROMIUM_PREPARE_LOCK:
-        try:
-            _ensure_pyppeteer_home()
-            from pyppeteer import chromium_downloader as cd
-
-            target = Path(cd.DOWNLOADS_FOLDER) / str(cd.__chromium_revision__)
-            if target.exists():
-                shutil.rmtree(target, ignore_errors=True)
-
-            logger.warning("Refreshing downloaded Chromium for pyppeteer...")
-            cd.download_chromium()
-            path = _downloaded_chromium_executable()
-            _ensure_executable_permission(path)
-            return path
-        except Exception as exc:
-            logger.warning(f"Chromium refresh failed: {exc!s}")
-            return None
-
-
-def _html_to_plain_text(html: str) -> str:
-    text = str(html or "")
-    text = re.sub(r"<\s*br\s*/?\s*>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"<\s*/\s*(p|div|section|article|li|h1|h2|h3|h4|h5|h6)\s*>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"<\s*script[\s\S]*?<\s*/\s*script\s*>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<\s*style[\s\S]*?<\s*/\s*style\s*>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", "", text)
-    text = html_lib.unescape(text)
-    lines = [re.sub(r"\s+", " ", ln).strip() for ln in text.splitlines()]
-    lines = [ln for ln in lines if ln]
-    return "\n".join(lines) or "(render fallback)"
-
-
-def _render_plain_text_png(
+async def _render_page_to_png(
     *,
-    text: str,
+    browser,
+    html: str,
     width: int,
     min_height: int,
     out_path: Path,
 ) -> str | None:
+    page = None
     try:
-        content_width = max(420, int(width))
-        font = ImageFont.load_default()
-        wrapped: list[str] = []
-        for line in str(text or "").splitlines() or [""]:
-            wrapped.extend(textwrap.wrap(line, width=64) or [""])
-
-        line_height = 20
-        pad_x, pad_y = 24, 24
-        canvas_h = max(int(min_height), pad_y * 2 + max(1, len(wrapped)) * line_height)
-
-        image = Image.new("RGB", (content_width, canvas_h), (248, 250, 252))
-        draw = ImageDraw.Draw(image)
-
-        y = pad_y
-        for line in wrapped:
-            draw.text((pad_x, y), line, fill=(15, 23, 42), font=font)
-            y += line_height
-
-        image.save(out_path, format="PNG")
+        timeout_ms = int(float(_HTML_RENDER_PAGE_TIMEOUT_SEC) * 1000)
+        page = await browser.new_page(
+            viewport={
+                "width": max(420, int(width)),
+                "height": max(320, int(min_height)),
+            },
+            device_scale_factor=1.5,
+        )
+        await page.set_content(html, wait_until="load", timeout=timeout_ms)
+        content_height = await page.evaluate(
+            """
+            () => {
+              const body = document.body;
+              const doc = document.documentElement;
+              return Math.ceil(Math.max(
+                body ? body.scrollHeight : 0,
+                body ? body.offsetHeight : 0,
+                doc ? doc.clientHeight : 0,
+                doc ? doc.scrollHeight : 0,
+                doc ? doc.offsetHeight : 0,
+              ));
+            }
+            """
+        )
+        await page.set_viewport_size(
+            {
+                "width": max(420, int(width)),
+                "height": max(320, int(content_height or min_height)),
+            }
+        )
+        await page.screenshot(
+            path=str(out_path), full_page=True, type="png", timeout=timeout_ms
+        )
         return str(out_path)
     except Exception as exc:
-        logger.warning(f"Plain-text fallback render failed: {exc!s}")
+        logger.warning(f"Browser render failed: {exc!s}")
         return None
+    finally:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
 
 
 async def _render_html_to_png_file_impl(
@@ -500,244 +284,55 @@ async def _render_html_to_png_file_impl(
 ) -> str | None:
     temp_dir = Path(get_astrbot_temp_path())
     temp_dir.mkdir(parents=True, exist_ok=True)
-    _ensure_pyppeteer_home()
     out_path = temp_dir / f"{prefix}_{uuid.uuid4().hex}.png"
 
-    remote_endpoint = str(_RENDER_BROWSER_WS_ENDPOINT or "").strip()
-    if not remote_endpoint and _is_empty_remote_local_chain_failed():
-        # Once empty-endpoint local chain has failed, directly use fallback to
-        # avoid repeated browser startup timeouts.
-        fallback_text = _html_to_plain_text(html)
-        fallback = _render_plain_text_png(
-            text=fallback_text,
-            width=width,
-            min_height=min_height,
-            out_path=out_path,
-        )
-        if fallback:
-            logger.warning(
-                "render_browser_ws_endpoint is empty and local browser chain is marked failed; using default plain-text image renderer."
-            )
-        return fallback
+    runtime = await _PLAYWRIGHT_RUNTIME.get()
+    if runtime is None:
+        return None
+
+    executable_path = _find_browser_executable()
+    launch_args = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-software-rasterizer",
+        "--no-zygote",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
 
     browser = None
-    remote_connected = False
-    launch_errors: list[str] = []
-    chromium_refreshed = False
     try:
-        # Lazy import keeps plugin load resilient when optional browser deps are broken.
-        from pyppeteer import connect, launch
-
-        if remote_endpoint:
-            try:
-                browser = await asyncio.wait_for(
-                    connect(browserWSEndpoint=remote_endpoint),
-                    timeout=float(_HTML_RENDER_CONNECT_TIMEOUT_SEC),
-                )
-                remote_connected = True
-            except Exception as exc:
-                launch_errors.append(f"remote({remote_endpoint}): {exc!s}")
-                logger.warning(
-                    f"Remote browser connect failed for {remote_endpoint}: {exc!s}"
-                )
-
-        launch_kwargs: dict[str, Any] = {
+        launch_timeout_ms = int(float(_HTML_RENDER_LAUNCH_TIMEOUT_SEC) * 1000)
+        kwargs: dict[str, Any] = {
             "headless": True,
-            # Rendering now runs in worker threads. Disable signal handlers to
-            # avoid thread-context startup issues.
-            "handleSIGINT": False,
-            "handleSIGTERM": False,
-            "handleSIGHUP": False,
-            "args": [
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-software-rasterizer",
-                "--no-zygote",
-                "--single-process",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-            "userDataDir": str(temp_dir / "pyppeteer_profile"),
+            "args": launch_args,
+            "timeout": launch_timeout_ms,
         }
+        if executable_path:
+            kwargs["executable_path"] = executable_path
 
-        if browser is None:
-            executable_candidates: list[str] = []
-            executable_path = _find_browser_executable()
-            if executable_path:
-                executable_candidates.append(executable_path)
-            else:
-                if _prepare_chromium_if_needed():
-                    logger.warning(
-                        "Using downloaded pyppeteer Chromium because local browser was not found."
-                    )
-                    downloaded = _downloaded_chromium_executable()
-                    if downloaded:
-                        _ensure_executable_permission(downloaded)
-                        executable_candidates.append(downloaded)
-                else:
-                    logger.warning(
-                        "Failed to render html snapshot: browser executable not found and "
-                        "Chromium download failed; set WF_HTML_RENDER_BROWSER to Edge/Chrome path"
-                    )
-                    if not remote_endpoint:
-                        _mark_empty_remote_local_chain_failed()
-                    fallback_text = _html_to_plain_text(html)
-                    return _render_plain_text_png(
-                        text=fallback_text,
-                        width=width,
-                        min_height=min_height,
-                        out_path=out_path,
-                    )
-
-            # In remote mode, local fallback should be fast and conservative.
-            if remote_endpoint and executable_candidates:
-                executable_candidates = executable_candidates[:1]
-
-            for candidate in list(executable_candidates):
-                try:
-                    kwargs = dict(launch_kwargs)
-                    kwargs["executablePath"] = candidate
-                    browser = await asyncio.wait_for(
-                        launch(**kwargs),
-                        timeout=float(_HTML_RENDER_LAUNCH_TIMEOUT_SEC),
-                    )
-                    break
-                except Exception as exc:
-                    launch_errors.append(f"{candidate}: {exc!s}")
-                    logger.warning(
-                        f"Browser launch attempt failed for {candidate}: {exc!s}"
-                    )
-                    missing_libs = _detect_missing_shared_libs(candidate)
-                    if missing_libs:
-                        logger.warning(
-                            "Chromium missing shared libs: " + ", ".join(missing_libs)
-                        )
-
-                    if not chromium_refreshed and _looks_like_downloaded_chromium(candidate):
-                        chromium_refreshed = True
-                        refreshed = _refresh_downloaded_chromium()
-                        if refreshed and refreshed not in executable_candidates:
-                            executable_candidates.append(refreshed)
-
-            if browser is None:
-                try:
-                    browser = await asyncio.wait_for(
-                        launch(**launch_kwargs),
-                        timeout=float(_HTML_RENDER_LAUNCH_TIMEOUT_SEC),
-                    )
-                except Exception as exc:
-                    launch_errors.append(f"default: {exc!s}")
-                    detail = " | ".join(launch_errors[-3:]) if launch_errors else str(exc)
-                    logger.warning(f"Failed to render html snapshot: {detail}")
-                    if not remote_endpoint:
-                        _mark_empty_remote_local_chain_failed()
-                    fallback_text = _html_to_plain_text(html)
-                    return _render_plain_text_png(
-                        text=fallback_text,
-                        width=width,
-                        min_height=min_height,
-                        out_path=out_path,
-                    )
-
-        page = await asyncio.wait_for(
-            browser.newPage(),
-            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
-        )
-        await page.setViewport(
-            {
-                "width": max(420, int(width)),
-                "height": max(320, int(min_height)),
-                # Lower DSF keeps output crisp enough while reducing raster cost.
-                "deviceScaleFactor": 1.5,
-            }
-        )
-        await asyncio.wait_for(
-            page.setContent(html),
-            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
-        )
-
-        content_height = await asyncio.wait_for(
-            page.evaluate(
-                """
-                () => {
-                  const body = document.body;
-                  const doc = document.documentElement;
-                  return Math.ceil(Math.max(
-                    body ? body.scrollHeight : 0,
-                    body ? body.offsetHeight : 0,
-                    doc ? doc.clientHeight : 0,
-                    doc ? doc.scrollHeight : 0,
-                    doc ? doc.offsetHeight : 0,
-                  ));
-                }
-                """
-            ),
-            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
-        )
-
-        await page.setViewport(
-            {
-                "width": max(420, int(width)),
-                "height": max(320, int(content_height or min_height)),
-                "deviceScaleFactor": 1.5,
-            }
-        )
-
-        await asyncio.wait_for(
-            page.screenshot(
-                {
-                    "path": str(out_path),
-                    "fullPage": True,
-                    "type": "png",
-                }
-            ),
-            timeout=float(_HTML_RENDER_PAGE_TIMEOUT_SEC),
-        )
-
-        return str(out_path)
-    except Exception as exc:
-        logger.warning(f"Failed to render html snapshot: {exc!s}")
-        if not remote_endpoint:
-            _mark_empty_remote_local_chain_failed()
-        fallback_text = _html_to_plain_text(html)
-        fallback = _render_plain_text_png(
-            text=fallback_text,
+        browser = await runtime.chromium.launch(**kwargs)
+        rendered = await _render_page_to_png(
+            browser=browser,
+            html=html,
             width=width,
             min_height=min_height,
             out_path=out_path,
         )
-        if fallback:
-            logger.warning("Using plain-text fallback image because browser snapshot failed.")
-        return fallback
+        if rendered:
+            return rendered
+    except Exception as exc:
+        logger.warning(f"Failed to render html snapshot by local playwright: {exc!s}")
     finally:
         if browser is not None:
             try:
-                if remote_connected:
-                    await browser.disconnect()
-                else:
-                    await browser.close()
+                await browser.close()
             except Exception:
                 pass
 
-
-def _render_html_to_png_file_worker(
-    *,
-    html: str,
-    width: int,
-    prefix: str,
-    min_height: int,
-) -> str | None:
-    # Run pyppeteer in a dedicated thread with its own event loop.
-    return asyncio.run(
-        _render_html_to_png_file_impl(
-            html=html,
-            width=width,
-            prefix=prefix,
-            min_height=min_height,
-        )
-    )
+    return None
 
 
 async def render_html_to_png_file(
@@ -747,23 +342,9 @@ async def render_html_to_png_file(
     prefix: str,
     min_height: int = 720,
 ) -> str | None:
-    if has_render_browser_ws_endpoint():
-        # Prefer pooled remote browser to avoid connect/disconnect overhead.
-        remote = await _render_html_to_png_with_remote_pool(
-            html=html,
-            width=width,
-            prefix=prefix,
-            min_height=min_height,
-        )
-        if remote:
-            return remote
-
-    loop = asyncio.get_running_loop()
-    fn = partial(
-        _render_html_to_png_file_worker,
+    return await _render_html_to_png_file_impl(
         html=html,
         width=width,
         prefix=prefix,
         min_height=min_height,
     )
-    return await loop.run_in_executor(_HTML_RENDER_EXECUTOR, fn)

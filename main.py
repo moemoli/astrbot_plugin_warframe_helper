@@ -23,7 +23,7 @@ from .http_utils import set_direct_domains, set_proxy_url
 from .mappers.riven_mapping import WarframeRivenWeaponMapper
 from .mappers.riven_stats_mapping import WarframeRivenStatMapper
 from .mappers.term_mapping import WarframeTermMapper
-from .renderers.html_snapshot import set_render_browser_ws_endpoint
+from .renderers.html_snapshot import ensure_playwright_runtime_ready
 from .renderers.template_loader import (
     set_current_render_command,
     set_render_template_name,
@@ -157,12 +157,6 @@ def _parse_render_template_name(config: dict | None) -> str:
     cfg = config or {}
     name = str(cfg.get("render_template_name") or "").strip()
     return name or "default"
-
-
-def _parse_render_browser_ws_endpoint(config: dict | None) -> str:
-    cfg = config or {}
-    endpoint = str(cfg.get("render_browser_ws_endpoint") or "").strip()
-    return endpoint
 
 
 def _parse_enable_no_prefix_commands(config: dict | None) -> bool:
@@ -303,7 +297,6 @@ class WarframeHelperPlugin(Star):
         self.config = config
 
         set_render_template_name(_parse_render_template_name(self.config))
-        set_render_browser_ws_endpoint(_parse_render_browser_ws_endpoint(self.config))
         self._enable_no_prefix_commands = _parse_enable_no_prefix_commands(self.config)
 
         _apply_proxy_config(self.config)
@@ -364,6 +357,7 @@ class WarframeHelperPlugin(Star):
 
     async def initialize(self):
         """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
+        await ensure_playwright_runtime_ready()
         await self.term_mapper.initialize()
         await self.riven_weapon_mapper.initialize()
         await self.riven_stat_mapper.initialize()

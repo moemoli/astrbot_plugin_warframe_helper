@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from astrbot.api import logger
 
-from .html_snapshot import has_render_browser_ws_endpoint, render_html_to_png_file
+from .html_snapshot import render_html_to_png_file
 from .template_loader import load_html_template
 
 
@@ -66,7 +66,9 @@ def _build_worldstate_html(
     context: dict[str, object] = {
         "page": {
             "title": (title or "").strip() or "Warframe",
-            "header_lines": [(x or "").strip() for x in header_lines[:3] if (x or "").strip()],
+            "header_lines": [
+                (x or "").strip() for x in header_lines[:3] if (x or "").strip()
+            ],
             "rows": row_items,
             "reward_rows": reward_items,
         }
@@ -101,10 +103,6 @@ async def render_worldstate_rows_image_to_file(
     )
 
     timeout_sec = max(1.0, float(render_timeout_sec))
-    # Remote browser connect + first-page warmup can be slower than local fallback.
-    # Give it a larger budget to avoid unnecessary text-only degradation.
-    if has_render_browser_ws_endpoint():
-        timeout_sec = max(timeout_sec, 15.0)
 
     try:
         path = await asyncio.wait_for(
@@ -117,9 +115,7 @@ async def render_worldstate_rows_image_to_file(
             timeout=timeout_sec,
         )
     except TimeoutError:
-        logger.warning(
-            f"worldstate html render timeout after {timeout_sec:.1f}s"
-        )
+        logger.warning(f"worldstate html render timeout after {timeout_sec:.1f}s")
         return None
 
     if not path:

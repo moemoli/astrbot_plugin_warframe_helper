@@ -110,48 +110,20 @@
 
 ```
 
-## 远程浏览器配置
+## Playwright 浏览器安装
 
-当 AstrBot 运行在 Linux Docker 且容器内缺少 Chromium 运行库时，推荐使用远程浏览器服务。
-
-### 1) 一键启动 browserless
+插件使用 Playwright 进行截图渲染。首次部署请先安装浏览器依赖与浏览器内核：
 
 ```bash
-sudo docker run -d --name browserless \
-  --restart unless-stopped \
-  -p 3100:3000 \
-  -e TOKEN=astrbot-token \
-  -e MAX_CONCURRENT_SESSIONS=5 \
-  -e CONNECTION_TIMEOUT=120000 \
-  browserless/chrome:latest
+playwright install-deps
+playwright install
 ```
 
-### 2) 在插件配置中填写远程地址
-
-新增配置项：`render_browser_ws_endpoint`
-
-```json
-{
-  "render_browser_ws_endpoint": "ws://宿主机内网ip:3100?token=astrbot-token"
-}
-```
-
-如果 AstrBot 与 browserless 运行在同一 Docker 网络（不同容器），可改为：
-
-```json
-{
-  "render_browser_ws_endpoint": "ws://browserless:3100?token=astrbot-token"
-}
-```
-
-### 3) 服务可用性检查
+若只需要 Chromium，也可以指定：
 
 ```bash
-curl -s http://127.0.0.1:3100/json/version
+playwright install-deps chromium
+playwright install chromium
 ```
 
-返回浏览器版本 JSON 即表示远程服务可用。
-
-### 4) 未配置远程地址时的默认行为
-
-当 `render_browser_ws_endpoint` 为空时，插件会直接使用默认文生图（纯文本图片）兜底，不再尝试启动本地浏览器。
+> 说明：在 Windows/macOS 上，`playwright install-deps` 可能提示不支持，可忽略；`playwright install` 仍需执行。

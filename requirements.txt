@@ -3,6 +3,6 @@
 
 aiohttp
 Pillow
-pyppeteer
+playwright
 websockets>=15.0.1
 Jinja2
