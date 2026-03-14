@@ -4,6 +4,7 @@ import asyncio
 import base64
 import mimetypes
 import os
+import platform
 import shutil
 import sys
 import uuid
@@ -60,13 +61,19 @@ class _PlaywrightRuntime:
 _PLAYWRIGHT_RUNTIME = _PlaywrightRuntime()
 
 
-async def _run_playwright_cli(args: list[str], *, timeout_sec: int) -> tuple[int, str]:
+async def _run_playwright_cli(
+    args: list[str], *, timeout_sec: int, env: dict[str, str] | None = None
+) -> tuple[int, str]:
     cmd = [sys.executable, "-m", "playwright", *args]
+    proc_env = os.environ.copy()
+    if env:
+        proc_env.update(env)
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            env=proc_env,
         )
     except Exception as exc:
         return 1, f"spawn failed: {exc!s}"
@@ -108,6 +115,7 @@ async def ensure_playwright_runtime_ready(*, browser: str | None = None) -> None
             60, _env_int("WF_PLAYWRIGHT_INSTALL_DEPS_TIMEOUT", 600)
         )
         install_timeout = max(60, _env_int("WF_PLAYWRIGHT_INSTALL_TIMEOUT", 600))
+        is_linux = platform.system().lower() == "linux"
 
         rc_deps, out_deps = await _run_playwright_cli(
             ["install-deps", target_browser],
@@ -122,10 +130,42 @@ async def ensure_playwright_runtime_ready(*, browser: str | None = None) -> None
         else:
             logger.info(f"playwright install-deps success: {target_browser}")
 
-        rc_install, out_install = await _run_playwright_cli(
-            ["install", target_browser],
-            timeout_sec=install_timeout,
-        )
+        install_attempts: list[dict[str, str] | None] = [None]
+        if is_linux:
+            if not os.environ.get("PLAYWRIGHT_DOWNLOAD_HOST"):
+                install_attempts.insert(
+                    0,
+                    {
+                        "PLAYWRIGHT_DOWNLOAD_HOST": "https://cdn.npmmirror.com/binaries/playwright",
+                        "PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST": "https://cdn.npmmirror.com/binaries/chrome-for-testing",
+                    },
+                )
+                install_attempts.insert(
+                    1,
+                    {
+                        "PLAYWRIGHT_DOWNLOAD_HOST": "https://npmmirror.com/mirrors/playwright",
+                        "PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST": "https://cdn.npmmirror.com/binaries/chrome-for-testing",
+                    },
+                )
+
+        rc_install = 1
+        out_install = ""
+        for idx, install_env in enumerate(install_attempts, start=1):
+            if install_env:
+                logger.info(
+                    f"playwright install attempt#{idx} with mirror host: {install_env.get('PLAYWRIGHT_DOWNLOAD_HOST', '')}"
+                )
+            else:
+                logger.info(f"playwright install attempt#{idx} with default host")
+
+            rc_install, out_install = await _run_playwright_cli(
+                ["install", target_browser],
+                timeout_sec=install_timeout,
+                env=install_env,
+            )
+            if rc_install == 0:
+                break
+
         if rc_install != 0:
             logger.warning(
                 "playwright install failed "
@@ -145,6 +185,13 @@ def start_playwright_runtime_prepare(*, browser: str | None = None) -> None:
     global _PLAYWRIGHT_PREPARE_TASK, _PLAYWRIGHT_PREPARING_SKIP_LOGGED
 
     if _PLAYWRIGHT_PREPARE_TASK is not None and not _PLAYWRIGHT_PREPARE_TASK.done():
+        return
+
+    local_browser = _find_browser_executable()
+    if local_browser:
+        logger.info(
+            f"local browser found, skip playwright install prepare: {local_browser}"
+        )
         return
 
     target_browser = (
