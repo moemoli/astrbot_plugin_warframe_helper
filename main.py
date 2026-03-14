@@ -23,7 +23,7 @@ from .http_utils import set_direct_domains, set_proxy_url
 from .mappers.riven_mapping import WarframeRivenWeaponMapper
 from .mappers.riven_stats_mapping import WarframeRivenStatMapper
 from .mappers.term_mapping import WarframeTermMapper
-from .renderers.html_snapshot import ensure_playwright_runtime_ready
+from .renderers.html_snapshot import start_playwright_runtime_prepare
 from .renderers.template_loader import (
     set_current_render_command,
     set_render_template_name,
@@ -357,7 +357,7 @@ class WarframeHelperPlugin(Star):
 
     async def initialize(self):
         """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
-        await ensure_playwright_runtime_ready()
+        start_playwright_runtime_prepare()
         await self.term_mapper.initialize()
         await self.riven_weapon_mapper.initialize()
         await self.riven_stat_mapper.initialize()

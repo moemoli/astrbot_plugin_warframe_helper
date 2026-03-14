@@ -30,6 +30,8 @@ _HTML_RENDER_PAGE_TIMEOUT_SEC = max(2, _env_int("WF_HTML_RENDER_PAGE_TIMEOUT", 6
 
 _PLAYWRIGHT_INSTALL_LOCK = asyncio.Lock()
 _PLAYWRIGHT_INSTALL_DONE = False
+_PLAYWRIGHT_PREPARE_TASK: asyncio.Task[Any] | None = None
+_PLAYWRIGHT_PREPARING_SKIP_LOGGED = False
 
 
 class _PlaywrightRuntime:
@@ -133,6 +135,45 @@ async def ensure_playwright_runtime_ready(*, browser: str | None = None) -> None
 
         logger.info(f"playwright install success: {target_browser}")
         _PLAYWRIGHT_INSTALL_DONE = True
+
+
+def is_playwright_runtime_preparing() -> bool:
+    return _PLAYWRIGHT_PREPARE_TASK is not None and not _PLAYWRIGHT_PREPARE_TASK.done()
+
+
+def start_playwright_runtime_prepare(*, browser: str | None = None) -> None:
+    global _PLAYWRIGHT_PREPARE_TASK, _PLAYWRIGHT_PREPARING_SKIP_LOGGED
+
+    if _PLAYWRIGHT_PREPARE_TASK is not None and not _PLAYWRIGHT_PREPARE_TASK.done():
+        return
+
+    target_browser = (
+        str(browser or os.environ.get("WF_PLAYWRIGHT_BROWSER") or "chromium")
+        .strip()
+        .lower()
+    )
+    if target_browser not in {"chromium", "firefox", "webkit"}:
+        target_browser = "chromium"
+
+    logger.info(f"playwright preparing started in background: {target_browser}")
+    _PLAYWRIGHT_PREPARING_SKIP_LOGGED = False
+
+    async def _runner() -> None:
+        try:
+            await ensure_playwright_runtime_ready(browser=browser)
+            if _PLAYWRIGHT_INSTALL_DONE:
+                logger.info(
+                    "playwright preparing finished; browser rendering is enabled"
+                )
+        except Exception as exc:
+            logger.warning(f"playwright background prepare failed: {exc!s}")
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    _PLAYWRIGHT_PREPARE_TASK = loop.create_task(_runner())
 
 
 def image_bytes_to_data_uri(
@@ -342,6 +383,16 @@ async def render_html_to_png_file(
     prefix: str,
     min_height: int = 720,
 ) -> str | None:
+    global _PLAYWRIGHT_PREPARING_SKIP_LOGGED
+
+    if is_playwright_runtime_preparing():
+        if not _PLAYWRIGHT_PREPARING_SKIP_LOGGED:
+            logger.info(
+                "playwright preparing in progress; skip browser render and fallback to plain text"
+            )
+            _PLAYWRIGHT_PREPARING_SKIP_LOGGED = True
+        return None
+
     return await _render_html_to_png_file_impl(
         html=html,
         width=width,
