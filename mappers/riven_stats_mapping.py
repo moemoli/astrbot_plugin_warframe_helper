@@ -32,6 +32,7 @@ WARFRAME_MARKET_RIVEN_ATTRIBUTES_CACHE_FILE = (
 class RivenStat:
     url_name: str
     effect: str | None = None
+    unit: str | None = None
     i18n_names: dict[str, str] = field(default_factory=dict)
 
 
@@ -149,6 +150,10 @@ class WarframeRivenStatMapper:
         if not isinstance(slug, str) or not slug:
             return None
 
+        unit = row.get("unit")
+        if not isinstance(unit, str):
+            unit = None
+
         i18n_raw = row.get("i18n")
         i18n_names: dict[str, str] = {}
         if isinstance(i18n_raw, dict):
@@ -160,7 +165,12 @@ class WarframeRivenStatMapper:
                     i18n_names[locale] = name
 
         effect = i18n_names.get("en") or _humanize_name(slug)
-        return RivenStat(url_name=slug, effect=effect, i18n_names=i18n_names)
+        return RivenStat(
+            url_name=slug,
+            effect=effect,
+            unit=unit,
+            i18n_names=i18n_names,
+        )
 
     def _build_indexes(self, stats: list[RivenStat]) -> None:
         self._stats = stats
@@ -204,6 +214,10 @@ class WarframeRivenStatMapper:
         if not isinstance(items, list):
             return False
 
+        # Old cache may not contain `unit`; refresh to ensure formatter can rely on unit metadata.
+        if any(isinstance(row, dict) and "unit" not in row for row in items):
+            return False
+
         stats: list[RivenStat] = []
         for row in items:
             if not isinstance(row, dict):
@@ -226,6 +240,7 @@ class WarframeRivenStatMapper:
                 {
                     "slug": s.url_name,
                     "effect": s.effect,
+                    "unit": s.unit,
                     "i18n": {
                         locale: {"name": name}
                         for locale, name in s.i18n_names.items()
@@ -285,6 +300,22 @@ class WarframeRivenStatMapper:
         if not url_name:
             return False
         return normalize_alias_key(url_name) in self._stats_by_slug
+
+    def get_unit(self, url_name: str) -> str | None:
+        key = normalize_alias_key(url_name)
+        if not key:
+            return None
+        stat = self._stats_by_slug.get(key)
+        if stat is None:
+            return None
+        return stat.unit
+
+    def get_unit_map(self) -> dict[str, str]:
+        return {
+            s.url_name: s.unit
+            for s in self._stats
+            if isinstance(s.url_name, str) and s.url_name and isinstance(s.unit, str)
+        }
 
     def _score_stat(self, *, stat: RivenStat, query_tokens: set[str]) -> int:
         tokens = self._stats_tokens.get(stat.url_name, set())

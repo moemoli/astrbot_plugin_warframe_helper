@@ -224,6 +224,16 @@ async def cmd_wfp(
 
         polarity = state.get("polarity")
         polarity = str(polarity).strip().lower() if polarity else None
+        attr_units_raw = state.get("riven_attr_units")
+        attr_units = (
+            {
+                str(k): str(v)
+                for k, v in attr_units_raw.items()
+                if isinstance(k, str) and isinstance(v, str)
+            }
+            if isinstance(attr_units_raw, dict)
+            else None
+        )
 
         auctions = await market_client.fetch_riven_auctions(
             weapon.url_name,
@@ -267,6 +277,7 @@ async def cmd_wfp(
             polarity=polarity,
             page=new_page,
             limit=limit,
+            attr_units=attr_units,
         )
 
         if not top:

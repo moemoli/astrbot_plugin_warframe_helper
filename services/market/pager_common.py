@@ -229,6 +229,7 @@ async def render_wmr_page_image(
     polarity: str | None,
     page: int,
     limit: int,
+    attr_units: dict[str, str] | None = None,
 ) -> tuple[WMRRenderedImage | None, list[RivenAuction], str]:
     picked = pick_page(auctions_ranked, page=page, limit=limit)
     if not picked:
@@ -252,6 +253,7 @@ async def render_wmr_page_image(
         platform=(platform or "pc"),
         summary=summary,
         limit=len(picked),
+        attr_units=attr_units,
     )
 
     return rendered, list(picked), summary

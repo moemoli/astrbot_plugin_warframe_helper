@@ -343,6 +343,7 @@ async def cmd_wmr(
 
     positive_stats = uniq_lower(positive_stats)
     negative_stats = uniq_lower(negative_stats)
+    attr_units = riven_stat_mapper.get_unit_map()
 
     if negative_forbidden:
         negative_required = False
@@ -411,6 +412,7 @@ async def cmd_wmr(
             "negative_forbidden": bool(negative_forbidden),
             "mastery_rank_min": mastery_rank_min,
             "polarity": polarity,
+            "riven_attr_units": dict(attr_units),
             "reply_msg_id": str(
                 getattr(getattr(event, "message_obj", None), "message_id", None) or ""
             ),
@@ -431,6 +433,7 @@ async def cmd_wmr(
         polarity=polarity,
         page=page,
         limit=limit,
+        attr_units=attr_units,
     )
 
     if not top:

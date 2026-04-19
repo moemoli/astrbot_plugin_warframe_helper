@@ -68,20 +68,50 @@ def _status_class(status: str | None) -> str:
     return "offline"
 
 
-def _fmt_attr_parts(attr: RivenAttribute) -> tuple[str, str]:
+def _fmt_attr_parts(
+    attr: RivenAttribute,
+    *,
+    attr_units: dict[str, str] | None = None,
+) -> tuple[str, str]:
     label = _STAT_CN.get(attr.url_name, attr.url_name)
     value = float(attr.value)
-    if abs(value) < 10:
-        return label, f"x{abs(value):.2f}"
+
+    unit = attr.unit
+    if not isinstance(unit, str) or not unit.strip():
+        if attr_units is not None:
+            unit = attr_units.get((attr.url_name or "").strip().lower())
+    unit_norm = (unit or "").strip().lower()
 
     sign = "+" if attr.positive else "-"
-    return label, f"{sign}{abs(value):.1f}%"
+    abs_value = abs(value)
+
+    if unit_norm == "seconds":
+        return label, f"{sign}{abs_value:.1f}s"
+
+    if unit_norm == "percent":
+        return label, f"{sign}{abs_value:.1f}%"
+
+    if unit_norm == "multiply":
+        if attr.positive:
+            return label, f"x{abs_value:.2f}"
+        return label, f"-x{abs_value:.2f}"
+
+    # Backward-compatible fallback for unknown unit.
+    if abs_value < 10:
+        return label, f"x{abs_value:.2f}"
+
+    return label, f"{sign}{abs_value:.1f}%"
 
 
-def _fmt_attr_line(attrs: list[RivenAttribute], *, empty_text: str) -> str:
+def _fmt_attr_line(
+    attrs: list[RivenAttribute],
+    *,
+    empty_text: str,
+    attr_units: dict[str, str] | None = None,
+) -> str:
     if not attrs:
         return empty_text
-    parts = [_fmt_attr_parts(a) for a in attrs]
+    parts = [_fmt_attr_parts(a, attr_units=attr_units) for a in attrs]
     return "，".join(f"{k} {v}" for k, v in parts)
 
 
@@ -147,6 +177,7 @@ async def render_wmr_auctions_image_to_file(
     platform: str,
     summary: str,
     limit: int,
+    attr_units: dict[str, str] | None = None,
 ) -> RenderedImage | None:
     if not auctions:
         return None
@@ -176,6 +207,12 @@ async def render_wmr_auctions_image_to_file(
     placeholder = _placeholder_avatar_data_uri()
 
     rows: list[dict[str, str]] = []
+    normalized_units: dict[str, str] = {
+        str(k).strip().lower(): str(v).strip().lower()
+        for k, v in (attr_units or {}).items()
+        if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip()
+    }
+
     for auction, avatar_bytes in zip(selected, avatar_bytes_list, strict=False):
         owner_name = (auction.owner_name or "unknown").strip() or "unknown"
         status = normalize_market_status(auction.owner_status)
@@ -192,8 +229,16 @@ async def render_wmr_auctions_image_to_file(
                 "mr_text": str(int(auction.mastery_level or 0)),
                 "polarity_text": _fmt_polarity(auction.polarity),
                 "rr_text": str(int(auction.re_rolls or 0)),
-                "pos_text": _fmt_attr_line(pos, empty_text="(无正面词条)"),
-                "neg_text": _fmt_attr_line(neg, empty_text="无负面词条"),
+                "pos_text": _fmt_attr_line(
+                    pos,
+                    empty_text="(无正面词条)",
+                    attr_units=normalized_units,
+                ),
+                "neg_text": _fmt_attr_line(
+                    neg,
+                    empty_text="无负面词条",
+                    attr_units=normalized_units,
+                ),
                 "price_text": f"{int(auction.buyout_price or 0)}p",
             }
         )

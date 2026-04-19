@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import aiohttp
 
@@ -245,7 +246,7 @@ class WarframeMarketClient:
             params.append(("buyout_policy", str(buyout_policy).strip().lower()))
 
         query = "&".join(
-            [f"{k}={aiohttp.helpers.quote(v, safe='')}" for k, v in params]
+            [f"{k}={quote(v, safe='')}" for k, v in params]
         )
         url = f"{WARFRAME_MARKET_V1_BASE_URL}/auctions/search?{query}"
         headers = {
@@ -359,17 +360,21 @@ class WarframeMarketClient:
                     url_name = a.get("url_name")
                     value = a.get("value")
                     positive = a.get("positive")
+                    unit = a.get("unit")
                     if not isinstance(url_name, str):
                         continue
                     if not isinstance(value, (int, float)):
                         continue
                     if not isinstance(positive, bool):
                         continue
+                    if not isinstance(unit, str):
+                        unit = None
                     attrs.append(
                         RivenAttribute(
                             url_name=url_name,
                             value=float(value),
                             positive=positive,
+                            unit=unit,
                         )
                     )
 
@@ -405,6 +410,7 @@ class RivenAttribute:
     url_name: str
     value: float
     positive: bool
+    unit: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
