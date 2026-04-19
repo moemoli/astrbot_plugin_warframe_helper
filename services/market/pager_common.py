@@ -79,6 +79,7 @@ def _wmr_fit_score(
     req_pos: set[str],
     req_neg: set[str],
     negative_required: bool,
+    negative_forbidden: bool,
     mastery_rank_min: int | None,
     polarity: str | None,
 ) -> int:
@@ -92,6 +93,8 @@ def _wmr_fit_score(
     score -= 50 * len(req_neg - a_neg)
 
     if negative_required and not a_neg:
+        score -= 20
+    if negative_forbidden and a_neg:
         score -= 20
 
     if req_pos:
@@ -118,6 +121,7 @@ def rank_wmr_auctions(
     positive_stats: list[str],
     negative_stats: list[str],
     negative_required: bool,
+    negative_forbidden: bool,
     mastery_rank_min: int | None,
     polarity: str | None,
 ) -> list[RivenAuction]:
@@ -132,11 +136,15 @@ def rank_wmr_auctions(
         and (a.platform or "").strip().lower() == platform_norm
     ]
 
-    if negative_required and not negative_stats:
-        filtered = [a for a in filtered if any((not x.positive) for x in a.attributes)]
-
     req_pos = set(uniq_lower(positive_stats))
     req_neg = set(uniq_lower(negative_stats))
+
+    if negative_forbidden:
+        filtered = [
+            a for a in filtered if not any((not x.positive) for x in a.attributes)
+        ]
+    elif negative_required and not req_neg:
+        filtered = [a for a in filtered if any((not x.positive) for x in a.attributes)]
 
     scored: list[tuple[int, RivenAuction]] = [
         (
@@ -145,6 +153,7 @@ def rank_wmr_auctions(
                 req_pos=req_pos,
                 req_neg=req_neg,
                 negative_required=bool(negative_required),
+                negative_forbidden=bool(negative_forbidden),
                 mastery_rank_min=mastery_rank_min,
                 polarity=polarity,
             ),
@@ -156,8 +165,8 @@ def rank_wmr_auctions(
     scored.sort(
         key=lambda x: (
             -int(x[0]),
-            presence_rank(x[1].owner_status),
             int(x[1].buyout_price or 0),
+            presence_rank(x[1].owner_status),
             (x[1].auction_id or ""),
         ),
     )
@@ -170,6 +179,7 @@ def build_wmr_summary(
     positive_stats: list[str],
     negative_stats: list[str],
     negative_required: bool,
+    negative_forbidden: bool,
     mastery_rank_min: int | None,
     polarity: str | None,
 ) -> str:
@@ -183,6 +193,8 @@ def build_wmr_summary(
         parts.append("负:" + fmt_stats(negative_stats))
     elif negative_required:
         parts.append("负:任意")
+    elif negative_forbidden:
+        parts.append("负:无")
     if mastery_rank_min is not None:
         parts.append(f"MR≥{mastery_rank_min}")
     if polarity:
@@ -201,6 +213,7 @@ async def render_wmr_page_image(
     positive_stats: list[str],
     negative_stats: list[str],
     negative_required: bool,
+    negative_forbidden: bool,
     mastery_rank_min: int | None,
     polarity: str | None,
     page: int,
@@ -210,18 +223,11 @@ async def render_wmr_page_image(
     if not picked:
         return None, [], ""
 
-    picked.sort(
-        key=lambda a: (
-            presence_rank(a.owner_status),
-            int(a.buyout_price or 0),
-            (a.owner_name or ""),
-        ),
-    )
-
     summary = build_wmr_summary(
         positive_stats=positive_stats,
         negative_stats=negative_stats,
         negative_required=negative_required,
+        negative_forbidden=negative_forbidden,
         mastery_rank_min=mastery_rank_min,
         polarity=polarity,
     )

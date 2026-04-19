@@ -11,15 +11,19 @@ from typing import Any
 import aiohttp
 
 from astrbot.api import logger
-from astrbot.core.utils.astrbot_path import (
-    get_astrbot_plugin_data_path,
-    get_astrbot_temp_path,
-)
+from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 from ..http_utils import fetch_json
+from .nickname_registry import (
+    NicknameRegistry,
+    SYM_BASE_NICKNAMES,
+    USER_ALIASES,
+    normalize_alias_key,
+)
 
 WARFRAME_MARKET_V2_BASE_URL = "https://api.warframe.market/v2"
 WARFRAME_MARKET_REQUEST_LANGUAGE = "zh-hans"
+WARFRAME_MARKET_ITEMS_CACHE_FILE = "warframe_market_v2_items_zh_hans_cache.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,11 +38,6 @@ class MarketItem:
     icon: str | None = None
 
     def get_localized_name(self, lang: str | None) -> str:
-        """按语言获取物品名称。
-
-        warframe.market v2 的 i18n 不一定包含所有语言；缺失时会回退到英文/默认名。
-        """
-
         if not lang:
             return self.name
         lang_norm = str(lang).strip().lower()
@@ -52,7 +51,6 @@ class MarketItem:
                 lang_norm.replace("-", "_"),
             ]
 
-            # Common Chinese locale aliases used by different data sources.
             locale_aliases: dict[str, tuple[str, ...]] = {
                 "cn": ("zh", "zh-hans", "zh-cn"),
                 "zh": ("zh", "zh-hans", "zh-cn"),
@@ -62,7 +60,7 @@ class MarketItem:
                 "zh-hant": ("zh-hant", "zh-tw"),
                 "tw": ("zh-tw", "zh-hant"),
             }
-            for alias in locale_aliases.get(lang_norm, ()):
+            for alias in locale_aliases.get(lang_norm, ()):  # noqa: PERF402
                 candidates.append(alias)
                 candidates.append(alias.replace("_", "-"))
                 candidates.append(alias.replace("-", "_"))
@@ -74,457 +72,287 @@ class MarketItem:
                 seen.add(c)
                 if c in self.i18n_names and self.i18n_names[c]:
                     return self.i18n_names[c]
-            if "en" in self.i18n_names:
+
+            if "en" in self.i18n_names and self.i18n_names["en"]:
                 return self.i18n_names["en"]
+
         return self.name
 
 
+@dataclass(frozen=True, slots=True)
+class MarketResolveTrace:
+    original_query: str
+    alias_key: str | None
+    canonical_full_name: str
+    matched_item_name: str | None
+    matched_slug: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedItemQuery:
+    raw_query: str
+    alias_key: str | None
+    canonical_name: str
+    wants_prime: bool
+    wants_set: bool
+    wants_blueprint: bool
+    part_hint: str | None
+    prefer_prime: bool
+
+
+def _normalize_name_key(text: str) -> str:
+    text = unicodedata.normalize("NFKC", str(text or ""))
+    text = text.strip().lower().replace("_", " ").replace("-", " ")
+    text = re.sub(r"[^0-9a-z\u4e00-\u9fff ]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _tokenize_name(text: str) -> list[str]:
+    key = _normalize_name_key(text)
+    if not key:
+        return []
+    return [t for t in key.split(" ") if t]
+
+
+def _slugify_text(text: str) -> str:
+    text = unicodedata.normalize("NFKC", str(text or ""))
+    text = text.strip().lower()
+    text = text.replace("'", "")
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text
+
+
+def _humanize_name(text: str) -> str:
+    src = str(text or "").strip()
+    if not src:
+        return ""
+
+    if re.fullmatch(r"[a-z0-9_\- ]+", src.lower()):
+        words = re.sub(r"[_\-]+", " ", src).split()
+        if not words:
+            return src
+        return " ".join(w.capitalize() for w in words)
+
+    return re.sub(r"\s+", " ", src)
+
+
 class WarframeTermMapper:
-    """将用户输入的别名/简写解析为 warframe.market 的官方词条。
-
-    设计目标：
-    - 内置别名在离线也能工作（例如：猴p -> Wukong Prime Set）。
-    - 网络可用时，从 warframe.market v2 API 拉取标准数据。
-    - 缓存已拉取的词条详情，减少重复请求。
-    - 支持通过 plugin_data 下的 JSON 文件扩展别名。
-    """
-
-    _BUILTIN_BASE_NICKNAMES: dict[str, str] = {
-        # 战甲别名/简称 -> warframe.market prime 词条 slug 的“基名”
-        # 说明：这里的 value 不是完整 item slug，而是用于拼接：
-        # - “p/prime” => f"{base}_prime_set"
-        # - “p机体/蓝图/系统/头/总图” => f"{base}_prime_<part>"
-        # 因此优先收录“确定无歧义”的官方中文名/常用外号；有歧义的建议放 aliases.json。
-        # ---- 起始战甲 / 老牌常用 ----
-        "excalibur": "excalibur",
-        "圣剑": "excalibur",
-        "剑男": "excalibur",
-        "mag": "mag",
-        "磁力": "mag",
-        "磁妈": "mag",
-        "volt": "volt",
-        "伏特": "volt",
-        "电男": "volt",
-        "rhino": "rhino",
-        "犀牛": "rhino",
-        "loki": "loki",
-        "洛基": "loki",
-        "老洛": "loki",
-        "ember": "ember",
-        "灰烬": "ember",
-        "火女": "ember",
-        "frost": "frost",
-        "冰霜": "frost",
-        "冰男": "frost",
-        "trinity": "trinity",
-        "三位一体": "trinity",
-        "奶妈": "trinity",
-        "三妈": "trinity",
-        "nova": "nova",
-        "新星": "nova",
-        "saryn": "saryn",
-        "沙林": "saryn",
-        "毒妈": "saryn",
-        "mesa": "mesa",
-        "魅莎": "mesa",
-        "女枪": "mesa",
-        "nekros": "nekros",
-        "死灵": "nekros",
-        "摸尸": "nekros",
-        "hydroid": "hydroid",
-        "海盗": "hydroid",
-        "水男": "hydroid",
-        "ivara": "ivara",
-        "伊瓦拉": "ivara",
-        "弓妹": "ivara",
-        "inaros": "inaros",
-        "伊纳罗斯": "inaros",
-        "沙甲": "inaros",
-        "wukong": "wukong",
-        "猴": "wukong",
-        "悟空": "wukong",
-        "nezha": "nezha",
-        "哪吒": "nezha",
-        "nidus": "nidus",
-        "尼德斯": "nidus",
-        # ---- 其他常见 Prime 战甲（官方中文名/常用称呼） ----
-        "ash": "ash",
-        "灰烬之刃": "ash",
-        "banshee": "banshee",
-        "女妖": "banshee",
-        "nyx": "nyx",
-        "灵煞": "nyx",
-        "脑溢血": "nyx",
-        "vauban": "vauban",
-        "瓦邦": "vauban",
-        "valkyr": "valkyr",
-        "女武神": "valkyr",
-        "瓦尔基里": "valkyr",
-        "zephyr": "zephyr",
-        "狂啸": "zephyr",
-        "oberon": "oberon",
-        "奥伯龙": "oberon",
-        "mirage": "mirage",
-        "幻蝶": "mirage",
-        "limbo": "limbo",
-        "林波": "limbo",
-        "小明": "limbo",
-        "李明博": "limbo",
-        "chroma": "chroma",
-        "龙甲": "chroma",
-        "atlas": "atlas",
-        "阿特拉斯": "atlas",
-        "石甲": "atlas",
-        "equinox": "equinox",
-        "阴阳双子": "equinox",
-        "titania": "titania",
-        "泰坦尼亚": "titania",
-        "妖精": "titania",
-        "octavia": "octavia",
-        "奥克塔维亚": "octavia",
-        "歌姬": "octavia",
-        "harrow": "harrow",
-        "哈洛": "harrow",
-        "gara": "gara",
-        "迦拉": "gara",
-        "玻璃": "gara",
-        "khora": "khora",
-        "科拉": "khora",
-        "鞭女": "khora",
-        "revenant": "revenant",
-        "亡魂": "revenant",
-        "garuda": "garuda",
-        "迦楼罗": "garuda",
-        "baruuk": "baruuk",
-        "巴鲁克": "baruuk",
-        "hildryn": "hildryn",
-        "希尔德琳": "hildryn",
-        "gauss": "gauss",
-        "高斯": "gauss",
-        "grendel": "grendel",
-        "格伦德尔": "grendel",
-        "protea": "protea",
-        "普罗蒂亚": "protea",
-        "xaku": "xaku",
-        "扎库": "xaku",
-        "lavos": "lavos",
-        "拉沃斯": "lavos",
-        "sevagoth": "sevagoth",
-        "塞瓦格斯": "sevagoth",
-        "yareli": "yareli",
-        "亚蕾丽": "yareli",
-        "caliban": "caliban",
-        "卡利班": "caliban",
-        "gyre": "gyre",
-        "吉尔": "gyre",
-        "styanax": "styanax",
-        "斯提亚纳克斯": "styanax",
-        "voruna": "voruna",
-        "沃鲁娜": "voruna",
-        "citrine": "citrine",
-        "西翠恩": "citrine",
-        "kullervo": "kullervo",
-        "库勒沃": "kullervo",
-        "dagath": "dagath",
-        "达加斯": "dagath",
-        "qorvex": "qorvex",
-        "科维克斯": "qorvex",
-        "dante": "dante",
-        "但丁": "dante",
-        "jade": "jade",
-        "翡翠": "jade",
-    }
+    """简称/全称 -> 本地缓存匹配 -> warframe.market slug。"""
 
     def __init__(
         self,
         *,
         http_timeout_sec: float = 8.0,
         cache_ttl_sec: float = 30 * 24 * 3600,
-        ai_timeout_sec: float = 15.0,
     ) -> None:
         self._timeout = aiohttp.ClientTimeout(total=http_timeout_sec)
         self._cache_ttl_sec = cache_ttl_sec
-        self._ai_timeout_sec = ai_timeout_sec
 
         self._plugin_data_dir = (
             Path(get_astrbot_plugin_data_path()) / "astrbot_plugin_warframe_helper"
         )
         self._plugin_data_dir.mkdir(parents=True, exist_ok=True)
-        self._user_alias_path = self._plugin_data_dir / "aliases.json"
 
-        self._temp_dir = Path(get_astrbot_temp_path())
-        self._temp_dir.mkdir(parents=True, exist_ok=True)
-        self._item_cache_path = self._temp_dir / "warframe_market_v2_item_cache.json"
+        self._nickname_registry = NicknameRegistry()
+        self._items_cache_path = self._plugin_data_dir / WARFRAME_MARKET_ITEMS_CACHE_FILE
 
-        self._user_aliases: dict[str, str] = {}
-        self._item_cache: dict[str, dict[str, Any]] = {}
+        self._alias_full_names: dict[str, str] = {}
+        self._base_alias_keys: set[str] = set()
+
+        self._items: list[MarketItem] = []
+        self._items_by_slug: dict[str, MarketItem] = {}
+        self._items_by_name_key: dict[str, list[MarketItem]] = {}
+        self._items_token_index: dict[str, set[str]] = {}
+
         self._loaded = False
+
+    @property
+    def items_cache_path(self) -> Path:
+        return self._items_cache_path
+
+    @property
+    def nickname_file_path(self) -> Path:
+        return self._nickname_registry.path
 
     async def initialize(self) -> None:
         if self._loaded:
             return
-        self._user_aliases = self._load_user_aliases()
-        self._item_cache = self._load_item_cache()
+
+        self.reload_aliases()
+
+        loaded = self._load_items_cache()
+        if not loaded:
+            await self.refresh_items_cache()
         self._loaded = True
 
-    def _normalize_key(self, text: str) -> str:
-        text = unicodedata.normalize("NFKC", text)
-        text = text.strip().lower()
-        text = re.sub(r"\s+", "", text)
-        return text
+    def reload_aliases(self) -> None:
+        base_aliases = self._nickname_registry.get_alias_map(SYM_BASE_NICKNAMES)
+        merged_aliases = self._nickname_registry.get_alias_map(
+            SYM_BASE_NICKNAMES,
+            USER_ALIASES,
+        )
+        self._base_alias_keys = set(base_aliases.keys())
+        self._alias_full_names = merged_aliases
 
-    def _load_user_aliases(self) -> dict[str, str]:
-        if not self._user_alias_path.exists():
-            return {}
-        try:
-            data = json.loads(self._user_alias_path.read_text(encoding="utf-8"))
-            aliases = data.get("aliases", {})
-            if not isinstance(aliases, dict):
-                return {}
-            normalized: dict[str, str] = {}
-            for alias, slug in aliases.items():
-                if not isinstance(alias, str) or not isinstance(slug, str):
-                    continue
-                normalized[self._normalize_key(alias)] = slug.strip()
-            return normalized
-        except Exception:
-            logger.warning("Failed to load user aliases.json; ignoring.")
-            return {}
+    def upsert_alias(self, *, alias: str, full_name: str) -> tuple[str, str]:
+        key, value = self._nickname_registry.upsert_alias(
+            alias=alias,
+            full_name=full_name,
+            section=USER_ALIASES,
+        )
+        self.reload_aliases()
+        return key, value
 
-    def _load_item_cache(self) -> dict[str, dict[str, Any]]:
-        if not self._item_cache_path.exists():
-            return {}
-        try:
-            data = json.loads(self._item_cache_path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                return {}
-            return data
-        except Exception:
-            logger.warning("Failed to load warframe.market item cache; ignoring.")
-            return {}
+    def _iter_item_names(self, item: MarketItem) -> list[str]:
+        out: list[str] = [item.name, item.slug.replace("_", " ")]
+        for name in item.i18n_names.values():
+            if isinstance(name, str) and name:
+                out.append(name)
+        return out
 
-    def _save_item_cache(self) -> None:
-        try:
-            self._item_cache_path.write_text(
-                json.dumps(self._item_cache, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception as exc:
-            logger.warning(f"Failed to save item cache: {exc!s}")
+    def _build_indexes(self, items: list[MarketItem]) -> None:
+        self._items = items
+        self._items_by_slug = {}
+        self._items_by_name_key = {}
+        self._items_token_index = {}
 
-    def _cache_get_item(self, slug: str) -> MarketItem | None:
-        rec = self._item_cache.get(slug)
-        if not isinstance(rec, dict):
+        for item in items:
+            slug_key = normalize_alias_key(item.slug)
+            if slug_key:
+                self._items_by_slug[slug_key] = item
+
+            token_set: set[str] = set()
+            for name in self._iter_item_names(item):
+                name_key = _normalize_name_key(name)
+                if name_key:
+                    self._items_by_name_key.setdefault(name_key, []).append(item)
+                token_set.update(_tokenize_name(name))
+
+            token_set.update(_tokenize_name(item.slug.replace("_", " ")))
+            self._items_token_index[item.slug] = token_set
+
+    def _row_to_item(self, row: dict[str, Any]) -> MarketItem | None:
+        slug = row.get("slug")
+        if not isinstance(slug, str) or not slug:
             return None
-        ts = rec.get("ts")
-        if not isinstance(ts, (int, float)):
-            return None
-        if (time.time() - float(ts)) > self._cache_ttl_sec:
-            return None
-        name = rec.get("name")
-        if not isinstance(name, str) or not name:
-            return None
-        wiki_link = rec.get("wiki_link")
-        if wiki_link is not None and not isinstance(wiki_link, str):
-            wiki_link = None
-        tags = rec.get("tags")
-        if isinstance(tags, list) and all(isinstance(t, str) for t in tags):
-            tags_tuple: tuple[str, ...] = tuple(tags)
-        else:
-            tags_tuple = ()
-        item_id = rec.get("item_id")
+
+        item_id = row.get("id")
         if item_id is not None and not isinstance(item_id, str):
             item_id = None
 
-        i18n_names: dict[str, str] = {}
-        raw_i18n_names = rec.get("i18n_names")
-        if isinstance(raw_i18n_names, dict):
-            for k, v in raw_i18n_names.items():
-                if isinstance(k, str) and isinstance(v, str) and v:
-                    i18n_names[k] = v
+        tags_raw = row.get("tags")
+        if isinstance(tags_raw, list) and all(isinstance(t, str) for t in tags_raw):
+            tags = tuple(tags_raw)
+        else:
+            tags = ()
 
-        thumb = rec.get("thumb")
-        if thumb is not None and not isinstance(thumb, str):
-            thumb = None
-        icon = rec.get("icon")
-        if icon is not None and not isinstance(icon, str):
-            icon = None
+        i18n_raw = row.get("i18n")
+        i18n_names: dict[str, str] = {}
+        wiki_link: str | None = None
+        thumb: str | None = None
+        icon: str | None = None
+
+        if isinstance(i18n_raw, dict):
+            for locale, block in i18n_raw.items():
+                if not isinstance(locale, str) or not isinstance(block, dict):
+                    continue
+                name = block.get("name")
+                if isinstance(name, str) and name:
+                    i18n_names[locale] = name
+
+                if locale == "en":
+                    wl = block.get("wikiLink")
+                    if isinstance(wl, str) and wl:
+                        wiki_link = wl
+                    t = block.get("thumb")
+                    if isinstance(t, str) and t:
+                        thumb = t
+                    ic = block.get("icon")
+                    if isinstance(ic, str) and ic:
+                        icon = ic
+
+        en_name = i18n_names.get("en") or _humanize_name(slug)
+
         return MarketItem(
             item_id=item_id,
             slug=slug,
-            name=name,
+            name=en_name,
             wiki_link=wiki_link,
-            tags=tags_tuple,
+            tags=tags,
             i18n_names=i18n_names,
             thumb=thumb,
             icon=icon,
         )
 
-    def _cache_put_item(
-        self, item: MarketItem, *, request_language: str | None = None
-    ) -> None:
-        rec: dict[str, Any] = {
+    def _load_items_cache(self) -> bool:
+        if not self._items_cache_path.exists():
+            return False
+
+        try:
+            raw = json.loads(self._items_cache_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+
+        if not isinstance(raw, dict):
+            return False
+
+        ts = raw.get("ts")
+        if not isinstance(ts, (int, float)):
+            return False
+        if (time.time() - float(ts)) > self._cache_ttl_sec:
+            return False
+
+        rows = raw.get("items")
+        if not isinstance(rows, list):
+            return False
+
+        items: list[MarketItem] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            converted = self._row_to_item(row)
+            if converted is not None:
+                items.append(converted)
+
+        if not items:
+            return False
+
+        self._build_indexes(items)
+        return True
+
+    def _save_items_cache(self) -> None:
+        payload = {
             "ts": time.time(),
-            "item_id": item.item_id,
-            "name": item.name,
-            "wiki_link": item.wiki_link,
-            "tags": list(item.tags),
-            "i18n_names": dict(item.i18n_names),
-            "thumb": item.thumb,
-            "icon": item.icon,
+            "language": WARFRAME_MARKET_REQUEST_LANGUAGE,
+            "items": [
+                {
+                    "id": item.item_id,
+                    "slug": item.slug,
+                    "name": item.name,
+                    "wiki_link": item.wiki_link,
+                    "tags": list(item.tags),
+                    "i18n": {
+                        locale: {"name": name}
+                        for locale, name in item.i18n_names.items()
+                    },
+                    "thumb": item.thumb,
+                    "icon": item.icon,
+                }
+                for item in self._items
+            ],
         }
-        if isinstance(request_language, str) and request_language.strip():
-            rec["request_language"] = request_language.strip().lower()
-        self._item_cache[item.slug] = rec
-        self._save_item_cache()
-
-    def _parse_prime_and_set(self, raw: str) -> tuple[str, bool, bool]:
-        text = unicodedata.normalize("NFKC", raw).strip()
-        lower = text.lower()
-
-        set_flag = False
-        if "set" in lower or "组" in text:
-            set_flag = True
-            lower = lower.replace("set", "")
-            text = re.sub(r"组$", "", text)
-
-        prime_flag = False
-        if lower.endswith("prime"):
-            prime_flag = True
-            lower = lower[: -len("prime")]
-        elif lower.endswith("p") and len(lower) >= 2:
-            prime_flag = True
-            lower = lower[:-1]
-
-        base = lower.strip()
-        base = re.sub(r"\s+", " ", base)
-        base = base.strip()
-        return base, prime_flag, set_flag
-
-    def _alias_to_slug(self, query: str) -> str | None:
-        key = self._normalize_key(query)
-        if key in self._user_aliases:
-            return self._user_aliases[key]
-
-        base, prime_flag, set_flag = self._parse_prime_and_set(query)
-        base_key = self._normalize_key(base)
-
-        if base_key in self._BUILTIN_BASE_NICKNAMES:
-            slug_base = self._BUILTIN_BASE_NICKNAMES[base_key]
-            if prime_flag:
-                # warframe.market 上 Prime 的交易通常对应 "... Prime Set" 词条。
-                return f"{slug_base}_prime_set"
-            if set_flag:
-                return f"{slug_base}_set"
-            return slug_base
-
-        if re.fullmatch(r"[a-z0-9 _\-']+", base_key):
-            slug_base = (
-                base_key.replace("'", "")
-                .replace("-", "_")
-                .replace(" ", "_")
-                .replace("__", "_")
-                .strip("_")
+        try:
+            self._items_cache_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
             )
-            if not slug_base:
-                return None
-            if prime_flag:
-                if slug_base.endswith("_prime"):
-                    return f"{slug_base}_set"
-                return f"{slug_base}_prime_set"
-            if set_flag and not slug_base.endswith("_set"):
-                return f"{slug_base}_set"
-            return slug_base
+        except Exception as exc:
+            logger.warning(f"Failed to save warframe.market items cache: {exc!s}")
 
-        return None
-
-    def _build_slug_candidates(self, query: str) -> list[str]:
-        # User aliases are explicit and should not be overridden by heuristics.
-        key = self._normalize_key(query)
-        if key in self._user_aliases:
-            slug = self._user_aliases[key]
-            return [slug] if slug else []
-
-        base, prime_flag, set_flag = self._parse_prime_and_set(query)
-        base_key = self._normalize_key(base)
-
-        candidates: list[str] = []
-
-        # Built-in warframe nicknames (e.g. 毒妈) are usually used to refer to the
-        # Prime Set in warframe.market. If user didn't specify p/prime/set,
-        # prefer trying "*_prime_set" first, but keep the original slug as fallback.
-        if (
-            base_key in self._BUILTIN_BASE_NICKNAMES
-            and (not prime_flag)
-            and (not set_flag)
-        ):
-            slug_base = self._BUILTIN_BASE_NICKNAMES[base_key]
-            candidates.append(f"{slug_base}_prime_set")
-
-        slug = self._alias_to_slug(query)
-        if slug:
-            candidates.append(slug)
-
-        # If we already have candidates (from alias/builtin heuristic), keep them.
-        if candidates:
-            # Dedup but keep order
-            dedup: list[str] = []
-            seen: set[str] = set()
-            for c in candidates:
-                if c and c not in seen:
-                    dedup.append(c)
-                    seen.add(c)
-            return dedup
-
-        base_key = self._normalize_key(base)
-        if not re.fullmatch(r"[a-z0-9 _\-']+", base_key):
-            return []
-
-        slug_base = (
-            base_key.replace("'", "")
-            .replace("-", "_")
-            .replace(" ", "_")
-            .replace("__", "_")
-            .strip("_")
-        )
-        if not slug_base:
-            return []
-
-        candidates = []
-        if prime_flag:
-            candidates.append(f"{slug_base}_prime_set")
-            candidates.append(f"{slug_base}_prime")
-        if set_flag:
-            candidates.append(f"{slug_base}_set")
-        candidates.append(slug_base)
-
-        # 去重但保留顺序
-        dedup: list[str] = []
-        seen: set[str] = set()
-        for c in candidates:
-            if c and c not in seen:
-                dedup.append(c)
-                seen.add(c)
-        return dedup
-
-    async def _fetch_item_v2(self, slug: str) -> MarketItem | None:
-        cache_rec = self._item_cache.get(slug)
-        cached = self._cache_get_item(slug)
-        # 兼容旧缓存：如果 cached 没有 item_id，则强制重新拉取。
-        # 另外旧缓存未记录 request_language 时，刷新一次以启用中文请求头。
-        cached_request_language = None
-        if isinstance(cache_rec, dict):
-            raw_lang = cache_rec.get("request_language")
-            if isinstance(raw_lang, str):
-                cached_request_language = raw_lang.strip().lower()
-        if (
-            cached
-            and cached.item_id
-            and cached_request_language == WARFRAME_MARKET_REQUEST_LANGUAGE
-        ):
-            return cached
-
-        url = f"{WARFRAME_MARKET_V2_BASE_URL}/item/{slug}"
+    async def _fetch_items_v2(self) -> list[MarketItem]:
+        url = f"{WARFRAME_MARKET_V2_BASE_URL}/items"
         headers = {
             "User-Agent": "AstrBot/warframe_helper (+https://github.com/Soulter/AstrBot)",
             "Accept": "application/json",
@@ -537,244 +365,340 @@ class WarframeTermMapper:
             headers=headers,
         )
         if not isinstance(payload, dict):
-            return None
+            return []
 
-        try:
-            data = payload.get("data")
-            if not isinstance(data, dict):
-                return None
-            item_id = data.get("id")
-            if not isinstance(item_id, str) or not item_id:
-                item_id = None
-            i18n = data.get("i18n", {})
-            if not isinstance(i18n, dict):
-                return None
+        data = payload.get("data")
+        if not isinstance(data, list):
+            return []
 
-            names: dict[str, str] = {}
-            wiki_links: dict[str, str] = {}
-            thumbs: dict[str, str] = {}
-            icons: dict[str, str] = {}
-            for locale, block in i18n.items():
-                if not isinstance(locale, str) or not isinstance(block, dict):
-                    continue
-                n = block.get("name")
-                if isinstance(n, str) and n:
-                    names[locale] = n
-                w = block.get("wikiLink")
-                if isinstance(w, str) and w:
-                    wiki_links[locale] = w
-                t = block.get("thumb")
-                if isinstance(t, str) and t:
-                    thumbs[locale] = t
-                ic = block.get("icon")
-                if isinstance(ic, str) and ic:
-                    icons[locale] = ic
-
-            name = names.get("en")
-            if not isinstance(name, str) or not name:
-                return None
-
-            wiki_link = wiki_links.get("en")
-            tags = data.get("tags")
-            if isinstance(tags, list) and all(isinstance(t, str) for t in tags):
-                tags_tuple = tuple(tags)
-            else:
-                tags_tuple = ()
-
-            item = MarketItem(
-                item_id=item_id,
-                slug=slug,
-                name=name,
-                wiki_link=wiki_link,
-                tags=tags_tuple,
-                i18n_names=names,
-                thumb=thumbs.get("en"),
-                icon=icons.get("en"),
-            )
-            self._cache_put_item(
-                item,
-                request_language=WARFRAME_MARKET_REQUEST_LANGUAGE,
-            )
-            return item
-        except Exception:
-            return None
-
-    async def resolve(self, query: str) -> MarketItem | None:
-        """将用户输入（别名/简写）解析为 warframe.market 词条。
-
-        示例：
-            - "猴p" -> MarketItem(slug="wukong_prime_set", name="Wukong Prime Set")
-        """
-        await self.initialize()
-
-        query = query.strip()
-        if not query:
-            return None
-
-        for slug in self._build_slug_candidates(query):
-            item = await self._fetch_item_v2(slug)
-            if item:
-                return item
-        return None
-
-    def _extract_json_object(self, text: str) -> str | None:
-        text = text.strip()
-        if not text:
-            return None
-        if text.startswith("{") and text.endswith("}"):
-            return text
-        # 尝试截取一个 JSON object 子串
-        m = re.search(r"\{[\s\S]*\}", text)
-        if not m:
-            return None
-        return m.group(0)
-
-    def _parse_ai_slugs(self, text: str) -> list[str]:
-        candidates: list[str] = []
-        obj = self._extract_json_object(text)
-        if obj:
-            try:
-                data = json.loads(obj)
-                slugs = data.get("slugs")
-                if isinstance(slugs, str):
-                    slugs = [slugs]
-                if isinstance(slugs, list):
-                    for s in slugs:
-                        if isinstance(s, str):
-                            candidates.append(s)
-            except Exception:
-                pass
-
-        if not candidates:
-            # 兜底：从文本里抓取类似 slug 的 token
-            candidates.extend(re.findall(r"\b[a-z0-9_]{3,}\b", text.lower()))
-
-        norm: list[str] = []
-        seen: set[str] = set()
-        for s in candidates:
-            s = s.strip().lower()
-            s = re.sub(r"[^a-z0-9_]+", "", s)
-            if not s:
+        out: list[MarketItem] = []
+        for row in data:
+            if not isinstance(row, dict):
                 continue
-            if s not in seen:
-                norm.append(s)
-                seen.add(s)
-        return norm
+            item = self._row_to_item(row)
+            if item is not None:
+                out.append(item)
 
-    async def _suggest_slugs_via_ai(
-        self,
-        context: Any,
-        event: Any,
-        query: str,
-        provider_id: str | None,
-    ) -> list[str]:
-        if not provider_id:
-            try:
-                provider_id = await context.get_current_chat_provider_id(
-                    event.unified_msg_origin,
-                )
-            except Exception as e:
-                logger.warning(
-                    "AI fallback skipped: failed to get current chat provider_id for warframe.market slug suggestion. query=%r err=%r",
-                    query,
-                    e,
-                )
-                return []
+        out.sort(key=lambda x: x.slug)
+        return out
 
-        if not provider_id:
-            logger.warning(
-                "AI fallback skipped: provider_id is empty for warframe.market slug suggestion. query=%r",
-                query,
-            )
-            return []
+    async def refresh_items_cache(self) -> int:
+        items = await self._fetch_items_v2()
+        if not items:
+            return 0
 
-        system_prompt = (
-            "You convert Warframe abbreviations/nicknames into warframe.market v2 item slugs. "
-            "Return JSON only."
-        )
-        prompt = (
-            "Given a user query, output up to 5 candidate warframe.market v2 item slugs.\n"
-            "Rules:\n"
-            '- Output MUST be valid JSON: {"slugs": ["..."]}.\n'
-            "- Slug format: lowercase snake_case with underscores.\n"
-            "- If the query implies Prime (e.g. ends with 'p' or contains 'prime'), prefer *_prime_set.\n"
-            "- If the query is a Warframe nickname in Chinese, map to the corresponding Warframe.\n"
-            "Examples:\n"
-            '- 猴p -> {"slugs":["wukong_prime_set"]}\n'
-            '- wukong p -> {"slugs":["wukong_prime_set"]}\n'
-            f"Query: {query}\n"
-            "JSON:"
-        )
-        try:
-            llm_resp = await context.llm_generate(
-                chat_provider_id=provider_id,
-                prompt=prompt,
-                system_prompt=system_prompt,
-                temperature=0,
-                timeout=self._ai_timeout_sec,
-            )
+        self._build_indexes(items)
+        self._save_items_cache()
+        return len(items)
 
-        except TypeError:
-            # 某些 Provider 可能不支持 timeout 参数
-            try:
-                llm_resp = await context.llm_generate(
-                    chat_provider_id=provider_id,
-                    prompt=prompt,
-                    system_prompt=system_prompt,
-                    temperature=0,
-                )
-            except Exception as e:
-                logger.warning(
-                    "AI fallback failed: llm_generate error (no-timeout retry) for warframe.market slug suggestion. provider_id=%r query=%r err=%r",
-                    provider_id,
-                    query,
-                    e,
-                )
-                return []
-        except Exception as e:
-            logger.warning(
-                "AI fallback failed: llm_generate error for warframe.market slug suggestion. provider_id=%r query=%r err=%r",
-                provider_id,
-                query,
-                e,
-            )
-            return []
-        logger.info(
-            f"LLM response for warframe.market slug suggestion: {llm_resp.completion_text or 'empty'}"
-        )
-        text = (llm_resp.completion_text or "").strip()
-        return self._parse_ai_slugs(text)
+    def _resolve_alias(self, query: str) -> tuple[str | None, str, str]:
+        q_norm = normalize_alias_key(query)
+        if not q_norm:
+            return None, "", ""
 
-    async def resolve_with_ai(
+        if q_norm in self._alias_full_names:
+            return q_norm, self._alias_full_names[q_norm], ""
+
+        best_key = ""
+        best_name = ""
+        for k, v in self._alias_full_names.items():
+            if not q_norm.startswith(k):
+                continue
+            if len(k) <= len(best_key):
+                continue
+            best_key = k
+            best_name = v
+
+        if best_key:
+            rest = q_norm[len(best_key) :]
+            return best_key, best_name, rest
+
+        return None, query, q_norm
+
+    def _parse_modifiers(
         self,
         *,
-        context: Any,
-        event: Any,
-        query: str,
-        provider_id: str | None = None,
-    ) -> MarketItem | None:
-        """先用内置规则解析，失败后用 AstrBot 的 LLM 做兜底。
+        raw_query: str,
+        alias_tail_norm: str,
+    ) -> tuple[bool, bool, bool, str | None]:
+        q_norm = normalize_alias_key(raw_query)
+        lc_query = unicodedata.normalize("NFKC", raw_query).strip().lower()
 
-        注意：LLM 的输出会被 warframe.market v2 API 二次校验，只有真实存在的 slug 才会返回。
-        """
-        item = await self.resolve(query)
-        if item:
-            return item
+        scope = alias_tail_norm or q_norm
 
-        ai_slugs = await self._suggest_slugs_via_ai(
-            context,
-            event,
-            query,
-            provider_id,
+        wants_prime = bool(
+            ("prime" in scope)
+            or ("圣装" in lc_query)
+            or (scope.endswith("p") and len(scope) > 1)
         )
-        # 同时把确定性的候选也加进来
-        candidates = ai_slugs + self._build_slug_candidates(query)
-        seen: set[str] = set()
-        for slug in candidates:
-            if slug in seen:
+        wants_set = bool(("set" in scope) or ("组" in lc_query) or ("一套" in lc_query))
+        wants_blueprint = bool(
+            ("blueprint" in scope)
+            or ("bp" in scope)
+            or ("蓝图" in lc_query)
+            or ("总图" in lc_query)
+            or ("图纸" in lc_query)
+        )
+
+        part_hint: str | None = None
+        part_map: tuple[tuple[str, tuple[str, ...]], ...] = (
+            ("Neuroptics", ("neuro", "neuroptics", "头", "神经")),
+            ("Chassis", ("chassis", "机体")),
+            ("Systems", ("systems", "系统")),
+        )
+        for part_name, keywords in part_map:
+            hit = False
+            for kw in keywords:
+                if kw in lc_query or kw in scope:
+                    hit = True
+                    break
+            if hit:
+                part_hint = part_name
+                wants_blueprint = True
+                break
+
+        return wants_prime, wants_set, wants_blueprint, part_hint
+
+    def _prepare_query(self, query: str) -> _PreparedItemQuery:
+        alias_key, alias_full_name, alias_tail = self._resolve_alias(query)
+        if not alias_full_name:
+            alias_full_name = query
+
+        (
+            wants_prime,
+            wants_set,
+            wants_blueprint,
+            part_hint,
+        ) = self._parse_modifiers(raw_query=query, alias_tail_norm=alias_tail)
+
+        canonical_name = _humanize_name(alias_full_name)
+        if part_hint and part_hint.lower() not in canonical_name.lower():
+            canonical_name = f"{canonical_name} {part_hint}".strip()
+
+        prefer_prime = bool(alias_key and alias_key in self._base_alias_keys)
+
+        return _PreparedItemQuery(
+            raw_query=query,
+            alias_key=alias_key,
+            canonical_name=canonical_name,
+            wants_prime=wants_prime,
+            wants_set=wants_set,
+            wants_blueprint=wants_blueprint,
+            part_hint=part_hint,
+            prefer_prime=prefer_prime,
+        )
+
+    def _extract_root_and_part(
+        self,
+        prepared: _PreparedItemQuery,
+    ) -> tuple[str, str | None, bool, bool, bool]:
+        words = [w for w in prepared.canonical_name.split(" ") if w]
+
+        has_prime = False
+        has_set = False
+        has_blueprint = False
+        part: str | None = None
+        root_words: list[str] = []
+
+        for w in words:
+            lw = w.strip().lower()
+            if lw == "prime":
+                has_prime = True
                 continue
-            seen.add(slug)
-            found = await self._fetch_item_v2(slug)
-            if found:
-                return found
-        return None
+            if lw == "set":
+                has_set = True
+                continue
+            if lw == "blueprint":
+                has_blueprint = True
+                continue
+            if lw in {"neuroptics", "chassis", "systems"}:
+                part = lw.capitalize() if lw != "systems" else "Systems"
+                continue
+            root_words.append(w)
+
+        if part is None and prepared.part_hint:
+            part = prepared.part_hint
+
+        root = " ".join(root_words).strip()
+        if not root:
+            root = prepared.canonical_name.strip()
+        return root, part, has_prime, has_set, has_blueprint
+
+    def _build_name_candidates(self, prepared: _PreparedItemQuery) -> list[str]:
+        root, part, has_prime, has_set, has_blueprint = self._extract_root_and_part(
+            prepared
+        )
+
+        candidates: list[str] = []
+
+        def _add(name: str) -> None:
+            name = re.sub(r"\s+", " ", str(name or "")).strip()
+            if not name:
+                return
+            if name not in candidates:
+                candidates.append(name)
+
+        _add(prepared.canonical_name)
+
+        if part:
+            _add(f"{root} {part}")
+            _add(f"{root} {part} Blueprint")
+            _add(f"{root} Prime {part}")
+            _add(f"{root} Prime {part} Blueprint")
+
+        should_try_prime = prepared.wants_prime or has_prime or prepared.prefer_prime
+        should_try_set = prepared.wants_set or has_set or prepared.prefer_prime
+
+        if should_try_prime and not part:
+            _add(f"{root} Prime")
+        if should_try_set:
+            _add(f"{root} Prime Set")
+        if prepared.wants_set and not should_try_prime:
+            _add(f"{root} Set")
+
+        if prepared.wants_blueprint or has_blueprint:
+            _add(f"{root} Blueprint")
+            _add(f"{root} Prime Blueprint")
+
+        _add(root)
+        _add(prepared.raw_query)
+        return candidates
+
+    def _score_item_match(
+        self,
+        *,
+        item: MarketItem,
+        query_tokens: set[str],
+        prepared: _PreparedItemQuery,
+    ) -> int:
+        item_tokens = self._items_token_index.get(item.slug, set())
+        if not query_tokens:
+            return -10_000
+
+        if not query_tokens.issubset(item_tokens):
+            return -10_000
+
+        score = 100
+        score -= max(0, len(item_tokens) - len(query_tokens))
+
+        generic = {"prime", "set", "blueprint"}
+        non_generic = [t for t in query_tokens if t not in generic]
+        if not non_generic:
+            return -10_000
+
+        if (prepared.prefer_prime or prepared.wants_prime) and "prime" in item_tokens:
+            score += 10
+        elif prepared.wants_prime and "prime" not in item_tokens:
+            score -= 8
+
+        if prepared.wants_set and "set" in item_tokens:
+            score += 8
+        elif prepared.wants_set and "set" not in item_tokens:
+            score -= 8
+
+        if prepared.wants_blueprint and "blueprint" in item_tokens:
+            score += 6
+
+        if prepared.part_hint:
+            if prepared.part_hint.lower() in item_tokens:
+                score += 12
+            else:
+                score -= 12
+
+        return score
+
+    def _resolve_prepared(self, prepared: _PreparedItemQuery) -> MarketItem | None:
+        if not self._items:
+            return None
+
+        candidates = self._build_name_candidates(prepared)
+
+        direct_slug_key = normalize_alias_key(prepared.raw_query)
+        if direct_slug_key in self._items_by_slug:
+            return self._items_by_slug[direct_slug_key]
+
+        for cand in candidates:
+            slug = _slugify_text(cand)
+            if slug and slug in self._items_by_slug:
+                return self._items_by_slug[slug]
+
+        for cand in candidates:
+            key = _normalize_name_key(cand)
+            if not key:
+                continue
+            matches = self._items_by_name_key.get(key)
+            if not matches:
+                continue
+            if len(matches) == 1:
+                return matches[0]
+
+            best_match = None
+            best_score = -10_000
+            tokens = set(_tokenize_name(cand))
+            for m in matches:
+                score = self._score_item_match(
+                    item=m,
+                    query_tokens=tokens,
+                    prepared=prepared,
+                )
+                if score > best_score:
+                    best_score = score
+                    best_match = m
+            if best_match is not None:
+                return best_match
+
+        best_item: MarketItem | None = None
+        best_score = -10_000
+        for cand in candidates:
+            tokens = set(_tokenize_name(cand))
+            if not tokens:
+                continue
+            for item in self._items:
+                score = self._score_item_match(
+                    item=item,
+                    query_tokens=tokens,
+                    prepared=prepared,
+                )
+                if score > best_score:
+                    best_score = score
+                    best_item = item
+
+        if best_item is None:
+            return None
+        if best_score < 80:
+            return None
+        return best_item
+
+    async def resolve(self, query: str) -> MarketItem | None:
+        item, _ = await self.resolve_with_trace(query)
+        return item
+
+    async def resolve_with_trace(
+        self,
+        query: str,
+    ) -> tuple[MarketItem | None, MarketResolveTrace]:
+        await self.initialize()
+
+        q = str(query or "").strip()
+        if not q:
+            trace = MarketResolveTrace(
+                original_query=q,
+                alias_key=None,
+                canonical_full_name="",
+                matched_item_name=None,
+                matched_slug=None,
+            )
+            return None, trace
+
+        prepared = self._prepare_query(q)
+        item = self._resolve_prepared(prepared)
+
+        trace = MarketResolveTrace(
+            original_query=q,
+            alias_key=prepared.alias_key,
+            canonical_full_name=prepared.canonical_name,
+            matched_item_name=(item.name if item else None),
+            matched_slug=(item.slug if item else None),
+        )
+        return item, trace
+

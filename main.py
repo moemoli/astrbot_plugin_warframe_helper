@@ -380,6 +380,7 @@ class WarframeHelperPlugin(Star):
         self._session_render_templates: dict[str, str] = {}
         set_render_template_resolver(self._resolve_session_template)
         self._enable_no_prefix_commands = _parse_enable_no_prefix_commands(self.config)
+        self._no_prefix_head_regex: re.Pattern[str] | None = None
 
         image_cache_dir = _parse_image_cache_config(self.config)
         configure_image_cache(
@@ -454,9 +455,32 @@ class WarframeHelperPlugin(Star):
         await self.term_mapper.initialize()
         await self.riven_weapon_mapper.initialize()
         await self.riven_stat_mapper.initialize()
+        await self._warmup_public_export(reason="initialize")
 
         # Start subscription polling loop after the event loop is ready.
         self._subscriptions.start()
+
+    async def _warmup_public_export(self, *, reason: str) -> dict[str, Any]:
+        try:
+            stats = await self.public_export_client.warmup_common_exports(language="zh")
+            if not bool(stats.get("ok", False)):
+                logger.warning(
+                    f"PublicExport warmup failed ({reason}): index unavailable"
+                )
+            return stats
+        except Exception as exc:
+            logger.warning(f"PublicExport warmup failed ({reason}): {exc!s}")
+            return {
+                "ok": False,
+                "language": "zh",
+                "index_files": 0,
+                "unique_names": 0,
+                "regions": 0,
+                "mission_types": 0,
+                "fissure_tiers": 0,
+                "factions": 0,
+                "syndicates": 0,
+            }
 
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
@@ -576,7 +600,7 @@ class WarframeHelperPlugin(Star):
         finally:
             await self._cleanup_result_image_file(result)
 
-    def _no_prefix_handler_map(self) -> dict[str, Callable[..., Any]]:
+    def _no_prefix_handler_map(self) -> dict[str, Callable[..., Any] | None]:
         return {
             "wf": self.wf_help_cmd,
             "wf帮助": self.wf_help_alias,
@@ -587,6 +611,8 @@ class WarframeHelperPlugin(Star):
             "渲染模板": self.wf_template,
             "wm": self.wm,
             "wmr": self.wmr,
+            "wr": self.wmr,
+            "wk": self.wmr,
             "wfp": self.wf_page,
             "订阅": self.wf_subscribe,
             "退订": self.wf_unsubscribe,
@@ -667,31 +693,42 @@ class WarframeHelperPlugin(Star):
             "syndicates": self.wf_syndicates,
         }
 
+    def _get_no_prefix_head_regex(self) -> re.Pattern[str]:
+        if self._no_prefix_head_regex is None:
+            commands = sorted(
+                {cmd.lower() for cmd in self._no_prefix_handler_map()},
+                key=len,
+                reverse=True,
+            )
+            # Match only when a command appears at the beginning of the message.
+            # Commands are length-sorted to avoid `wf` shadowing `wfmap`.
+            alternation = "|".join(re.escape(cmd) for cmd in commands)
+            self._no_prefix_head_regex = re.compile(
+                rf"^(?P<cmd>{alternation})",
+                re.IGNORECASE,
+            )
+        return self._no_prefix_head_regex
+
     def _parse_no_prefix_command(self, text: str) -> tuple[str | None, str]:
-        """Resolve no-prefix command and raw args from an arbitrary text line."""
+        """Resolve command and args only when command is at message start."""
         src = (text or "").strip()
         if not src:
             return None, ""
 
-        command_map = self._no_prefix_handler_map()
-        lowered = src.lower()
+        match = self._get_no_prefix_head_regex().match(src)
+        if not match:
+            return None, ""
 
-        # Longest-match first to avoid `wf` shadowing `wfmap`.
-        for cmd in sorted(command_map.keys(), key=len, reverse=True):
-            cmd_l = cmd.lower()
-            if not lowered.startswith(cmd_l):
-                continue
+        cmd_text = match.group("cmd")
+        rest = src[match.end("cmd") :]
 
-            rest = src[len(cmd) :]
+        # Keep legacy behavior: ASCII commands require a boundary to avoid
+        # accidental hits like `wfmapping` being interpreted as `wf`.
+        if rest and (not rest[0].isspace()) and cmd_text.isascii():
+            return None, ""
 
-            # For ASCII commands, require a boundary to avoid accidental hits
-            # like `wfmapping` being interpreted as `wf`.
-            if rest and (not rest[0].isspace()) and cmd.isascii():
-                continue
-
-            return cmd_l, rest.strip()
-
-        return None, ""
+        cmd_l = cmd_text.lower()
+        return cmd_l, rest.strip()
 
     @filter.regex(r"^\S(?:[\s\S]*)$")
     async def no_prefix_command_router(self, event: AstrMessageEvent):
@@ -922,16 +959,9 @@ class WarframeHelperPlugin(Star):
                 yield output
             return
 
-        item = await self.term_mapper.resolve_with_ai(
-            context=self.context,
-            event=event,
-            query=query,
-            provider_id=(
-                self.config.get("unknown_abbrev_provider_id") if self.config else ""
-            ),
-        )
+        item, trace = await self.term_mapper.resolve_with_trace(query)
         if not item:
-            result = event.plain_result(f"未找到可映射的词条：{query}")
+            result = event.plain_result(f"没有找到相关物品：{query}")
             if await self._try_send_qq_markdown_for_result(
                 event=event,
                 result=result,
@@ -944,7 +974,12 @@ class WarframeHelperPlugin(Star):
                 yield output
             return
 
-        header = [f"{query} -> {item.name}", f"slug: {item.slug}"]
+        matched_name = item.get_localized_name("zh-hans") or item.name
+        header = [
+            f"{query} -> {trace.canonical_full_name}",
+            f"{trace.canonical_full_name} -> {matched_name}",
+            f"{matched_name} -> {item.slug}",
+        ]
         rows = (
             [WorldstateRow(title=f"Wiki: {item.wiki_link}")]
             if item.wiki_link
@@ -971,7 +1006,9 @@ class WarframeHelperPlugin(Star):
             return
 
         extra = f"\nWiki: {item.wiki_link}" if item.wiki_link else ""
-        result = event.plain_result(f"{query} -> {item.name} ({item.slug}){extra}")
+        result = event.plain_result(
+            f"{query} -> {trace.canonical_full_name} -> {matched_name} -> {item.slug}{extra}"
+        )
         if await self._try_send_qq_markdown_for_result(
             event=event,
             result=result,
@@ -982,6 +1019,42 @@ class WarframeHelperPlugin(Star):
             return
         async for output in self._yield_result_and_cleanup_image(result):
             yield output
+
+    @filter.command("简称补充")
+    async def wf_add_alias(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
+        """管理员补充简称映射。用法：/简称补充 <简称> <全称>"""
+
+        _safe_disable_llm(event, reason="/简称补充")
+
+        if not event.is_admin():
+            yield event.plain_result("/简称补充 仅限 astradmin 使用。")
+            return
+
+        raw = str(args or "").strip()
+        parts = raw.split(maxsplit=1)
+        if len(parts) != 2:
+            yield event.plain_result("用法：/简称补充 [简称] [全称]")
+            return
+
+        alias, full_name = parts[0].strip(), parts[1].strip()
+        if not alias or not full_name:
+            yield event.plain_result("用法：/简称补充 [简称] [全称]")
+            return
+
+        try:
+            _, _ = self.term_mapper.upsert_alias(alias=alias, full_name=full_name)
+            self.term_mapper.reload_aliases()
+            self.riven_weapon_mapper.reload_aliases()
+            self.riven_stat_mapper.reload_aliases()
+        except Exception as exc:
+            yield event.plain_result(f"简称补充失败：{exc!s}")
+            return
+
+        yield event.plain_result(
+            "简称补充成功："
+            f"{alias} -> {full_name}\n"
+            f"简称文件：{self.term_mapper.nickname_file_path}"
+        )
 
     @filter.command_group("wf")
     def wf(self):
@@ -1024,11 +1097,63 @@ class WarframeHelperPlugin(Star):
         image_result = _clear_plugin_image_cache()
         img_removed = int(image_result.get("removed", 0))
         img_failed = int(image_result.get("failed", 0))
+
+        items_n = await self.term_mapper.refresh_items_cache()
+        lich_weapons_n = await self.riven_weapon_mapper.refresh_cache()
+        riven_attrs_n = await self.riven_stat_mapper.refresh_cache()
+
+        self.term_mapper.reload_aliases()
+        self.riven_weapon_mapper.reload_aliases()
+        self.riven_stat_mapper.reload_aliases()
+        pe_stats = await self._warmup_public_export(reason="wf_refresh")
+
         return event.plain_result(
             "/wf refresh 完成："
             f"PublicExport 内存条目 {mem_n}，worldstate 缓存条目 {ws_n}，磁盘缓存 {disk_msg}；"
             f"图片缓存已删除 {img_removed} 个"
-            + (f"（失败 {img_failed} 个）" if img_failed > 0 else "。")
+            + (f"（失败 {img_failed} 个）；" if img_failed > 0 else "；")
+            + "WFM 缓存刷新："
+            f"items {items_n}，lich weapons {lich_weapons_n}，riven attributes {riven_attrs_n}；"
+            + "PublicExport 预热："
+            + (
+                f"index {int(pe_stats.get('index_files', 0))}，"
+                f"unique_names {int(pe_stats.get('unique_names', 0))}，"
+                f"regions {int(pe_stats.get('regions', 0))}。"
+                if bool(pe_stats.get("ok", False))
+                else "失败（索引不可用或网络异常）。"
+            )
+        )
+
+    async def _handle_wm_refresh(self, event: AstrMessageEvent):
+        if not event.is_admin():
+            return event.plain_result("/wm 刷新缓存 仅限 astradmin 使用。")
+
+        items_n = await self.term_mapper.refresh_items_cache()
+        lich_weapons_n = await self.riven_weapon_mapper.refresh_cache()
+        riven_attrs_n = await self.riven_stat_mapper.refresh_cache()
+
+        self.term_mapper.reload_aliases()
+        self.riven_weapon_mapper.reload_aliases()
+        self.riven_stat_mapper.reload_aliases()
+        pe_stats = await self._warmup_public_export(reason="wm_refresh")
+
+        if items_n <= 0 and lich_weapons_n <= 0 and riven_attrs_n <= 0:
+            return event.plain_result(
+                "/wm 刷新缓存失败：未从 warframe.market 拉取到有效数据，请稍后重试。"
+            )
+
+        return event.plain_result(
+            "/wm 刷新缓存完成："
+            f"items {items_n}，lich weapons {lich_weapons_n}，riven attributes {riven_attrs_n}；"
+            + "PublicExport 预热："
+            + (
+                f"index {int(pe_stats.get('index_files', 0))}，"
+                f"unique_names {int(pe_stats.get('unique_names', 0))}，"
+                f"regions {int(pe_stats.get('regions', 0))}。\n"
+                if bool(pe_stats.get("ok", False))
+                else "失败（索引不可用或网络异常）。\n"
+            )
+            + f"items 缓存：{self.term_mapper.items_cache_path}"
         )
 
     async def _handle_wf_help(self, event: AstrMessageEvent):
@@ -1036,7 +1161,7 @@ class WarframeHelperPlugin(Star):
         rows = [
             WorldstateRow(
                 title="市场查询",
-                subtitle="/wm /wmr /wfp（翻页 prev|next；QQ 按钮可用 wfp:prev / wfp:next）",
+                subtitle="/wm /wmr（别名：wr、wk） /wfp（翻页 prev|next；QQ 按钮可用 wfp:prev / wfp:next）",
             ),
             WorldstateRow(
                 title="订阅",
@@ -1073,7 +1198,7 @@ class WarframeHelperPlugin(Star):
             WorldstateRow(
                 title="工具",
                 subtitle=(
-                    "/wfmap（别名：wf映射）/模板（别名：wf模板、渲染模板）/wf refresh（仅astradmin）/wf（本帮助；别名：wf帮助）"
+                    "/wfmap（别名：wf映射）/简称补充（仅astradmin）/wm 刷新缓存（仅astradmin）/模板（别名：wf模板、渲染模板）/wf refresh（仅astradmin）/wf（本帮助；别名：wf帮助）"
                 ),
             ),
         ]
@@ -1147,7 +1272,15 @@ class WarframeHelperPlugin(Star):
         """
         _apply_render_template_for_event(event)
 
-        raw_args = str(args)
+        raw_args = str(args or "")
+        raw_args_norm = raw_args.strip().lower()
+        if raw_args_norm in {"refresh", "reset", "刷新", "刷新缓存", "重置缓存"}:
+            _safe_disable_llm(event, reason="/wm 刷新缓存")
+            result = await self._handle_wm_refresh(event)
+            async for output in self._yield_result_and_cleanup_image(result):
+                yield output
+            return
+
         converted_wmr_args = _convert_wm_args_to_wmr(raw_args)
         if converted_wmr_args is not None:
             set_current_render_command("/wmr")
@@ -1195,12 +1328,13 @@ class WarframeHelperPlugin(Star):
             async for output in self._yield_result_and_cleanup_image(res):
                 yield output
 
-    @filter.command("wmr")
+    @filter.command("wmr", alias={"wr", "wk"})
     async def wmr(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
         """查询 warframe.market 紫卡（Riven）一口价拍卖。
 
-        示例：/wmr 绝路 双暴 负任意 12段 r槽
-        语义：武器=绝路，正面=暴击率+暴击伤害，负面任意（但需要有负面），MR>=12，极性=R(zenurik)
+        示例：/wmr 基伤 双暴 伯斯顿
+        示例：/wmr 基伤 逐枭 负暴率
+        说明：武器名与词条可混写；负任意=必须有任意负词条；无负=不能有负词条。
         """
         _apply_render_template_for_event(event)
 

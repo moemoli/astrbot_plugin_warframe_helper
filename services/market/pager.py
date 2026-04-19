@@ -212,6 +212,7 @@ async def cmd_wfp(
             if str(x).strip()
         ]
         negative_required = bool(state.get("negative_required") or False)
+        negative_forbidden = bool(state.get("negative_forbidden") or False)
 
         mastery_rank_min = state.get("mastery_rank_min")
         if mastery_rank_min is not None:
@@ -245,6 +246,7 @@ async def cmd_wfp(
             positive_stats=positive_stats,
             negative_stats=negative_stats,
             negative_required=negative_required,
+            negative_forbidden=negative_forbidden,
             mastery_rank_min=mastery_rank_min,
             polarity=polarity,
         )
@@ -258,6 +260,7 @@ async def cmd_wfp(
             positive_stats=uniq_lower(positive_stats),
             negative_stats=uniq_lower(negative_stats),
             negative_required=negative_required,
+            negative_forbidden=negative_forbidden,
             mastery_rank_min=mastery_rank_min,
             polarity=polarity,
             page=new_page,

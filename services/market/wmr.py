@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 
 from astrbot.api import logger
@@ -9,106 +8,111 @@ from astrbot.api.event import AstrMessageEvent
 from ...clients.market_client import WarframeMarketClient
 from ...components.event_ttl_cache import EventScopedTTLCache
 from ...components.qq_official_webhook import QQOfficialWebhookPager
-from ...constants import MARKET_PLATFORM_ALIASES, RIVEN_STAT_ALIASES
+from ...constants import MARKET_PLATFORM_ALIASES
 from ...constants import market_status_to_cn
 from ...helpers import split_tokens, uniq_lower
-from ...mappers.riven_mapping import WarframeRivenWeaponMapper
+from ...mappers.riven_mapping import RivenWeapon, WarframeRivenWeaponMapper
 from ...mappers.riven_stats_mapping import WarframeRivenStatMapper
 from .pager_common import rank_wmr_auctions, render_wmr_page_image
+
+
+_WMR_USAGE_TEXT = (
+    "用法：/wmr|/wr|/wk <武器与词条可混写> [条件...]\n"
+    "示例：/wmr 基伤 双暴 伯斯顿\n"
+    "示例：/wmr 基伤 逐枭 负暴率\n"
+    "说明：负任意=必须有任意负词条；无负=不能有负词条。"
+)
 
 
 def _normalize_key(text: str) -> str:
     return re.sub(r"\s+", "", str(text or "").strip().lower())
 
 
-async def _ai_split_stat_token(
+def _is_wmr_control_token(token_norm: str) -> bool:
+    t = (token_norm or "").strip().lower()
+    if not t:
+        return True
+
+    if t in MARKET_PLATFORM_ALIASES or t in MARKET_PLATFORM_ALIASES.values():
+        return True
+    if t.isdigit():
+        return True
+
+    if re.fullmatch(r"mr?(\d{1,2})", t):
+        return True
+    if re.fullmatch(r"(\d{1,2})段", t):
+        return True
+
+    if re.fullmatch(r"([vd\-r])槽", t):
+        return True
+    if re.fullmatch(r"([vd\-r])极性", t):
+        return True
+    if re.fullmatch(r"极性([vd\-r])", t):
+        return True
+    if t in {"madurai", "vazarin", "naramon", "zenurik"}:
+        return True
+
+    if t in {"负任意", "任意负", "有负", "要负", "无负", "不要负", "不带负"}:
+        return True
+    if "双暴" in t or "双爆" in t:
+        return True
+
+    return False
+
+
+async def _extract_weapon_and_rest_tokens(
     *,
-    context: object,
-    provider_id: str,
-    token: str,
-) -> list[str]:
-    tok = (token or "").strip()
-    if not tok or not provider_id:
-        return []
+    tokens: list[str],
+    riven_weapon_mapper: WarframeRivenWeaponMapper,
+) -> tuple[str, RivenWeapon, list[str]] | None:
+    if not tokens:
+        return None
 
-    system_prompt = (
-        "You split a Warframe Riven stat shorthand token into individual stat tokens. "
-        "Return JSON only."
-    )
-    prompt = (
-        "Split the following user token into 1~6 smaller stat tokens (Chinese or common abbreviations).\n"
-        "Rules:\n"
-        '- Output MUST be valid JSON: {"tokens": ["..."]}.\n'
-        "- Do NOT output explanations.\n"
-        "- Keep tokens minimal and meaningful for riven stat parsing.\n"
-        "Examples:\n"
-        '- "双爆毒" -> {"tokens":["双爆","毒"]}\n'
-        '- "暴伤多重" -> {"tokens":["暴伤","多重"]}\n'
-        f"Token: {tok}\n"
-        "JSON:"
-    )
+    await riven_weapon_mapper.initialize()
 
-    try:
-        llm_generate = getattr(context, "llm_generate")
-        llm_resp = await llm_generate(
-            chat_provider_id=provider_id,
-            prompt=prompt,
-            system_prompt=system_prompt,
-            temperature=0,
-            timeout=15,
-        )
-    except TypeError:
-        try:
-            llm_generate = getattr(context, "llm_generate")
-            llm_resp = await llm_generate(
-                chat_provider_id=provider_id,
-                prompt=prompt,
-                system_prompt=system_prompt,
-                temperature=0,
+    local_cache: dict[str, RivenWeapon | None] = {}
+    best: tuple[tuple[int, int, int, int], int, int, str, RivenWeapon] | None = None
+
+    total = len(tokens)
+    for start in range(total):
+        for end in range(start + 1, total + 1):
+            span_tokens = tokens[start:end]
+            span_norm = [_normalize_key(x) for x in span_tokens]
+            if not all(span_norm):
+                continue
+
+            # Skip spans containing obvious non-weapon control tokens.
+            if any(_is_wmr_control_token(x) for x in span_norm):
+                continue
+
+            query = " ".join(span_tokens).strip()
+            if not query:
+                continue
+
+            if query not in local_cache:
+                local_cache[query] = await riven_weapon_mapper.resolve_weapon_local(
+                    query=query
+                )
+            weapon = local_cache[query]
+            if weapon is None:
+                continue
+
+            # Prefer longer spans, then longer normalized content, then later position.
+            score = (
+                end - start,
+                sum(len(x) for x in span_norm),
+                end,
+                -start,
             )
-        except Exception:
-            return []
-    except Exception:
-        return []
+            if best is None or score > best[0]:
+                best = (score, start, end, query, weapon)
 
-    text = (getattr(llm_resp, "completion_text", None) or "").strip()
+    if best is None:
+        return None
 
-    obj: object | None = None
-    try:
-        obj = json.loads(text)
-    except Exception:
-        m = re.search(r"\{[\s\S]*\}", text)
-        if m:
-            try:
-                obj = json.loads(m.group(0))
-            except Exception:
-                obj = None
-
-    arr = obj.get("tokens") if isinstance(obj, dict) else None
-    if isinstance(arr, str):
-        arr = [arr]
-    if not isinstance(arr, list):
-        return []
-
-    out: list[str] = []
-    seen: set[str] = set()
-    for s in arr:
-        if not isinstance(s, str):
-            continue
-        s2 = s.strip()
-        s2 = re.sub(r"^(正面|正|负面|负)[:：]?", "", s2)
-        s2 = s2.strip(" ,，+\t\r\n")
-        if not s2:
-            continue
-        k = s2.lower()
-        if k in seen:
-            continue
-        seen.add(k)
-        out.append(s2)
-        if len(out) >= 6:
-            break
-
-    return out
+    _, start, end, query, weapon = best
+    rest = tokens[:start] + tokens[end:]
+    return query, weapon, rest
 
 
 async def cmd_wmr(
@@ -130,20 +134,24 @@ async def cmd_wmr(
 
     arg_text = str(raw_args or "").strip()
     if not arg_text:
-        yield event.plain_result(
-            "用法：/wmr <武器> [条件...] 例如：/wmr 绝路 双暴 负任意 12段 r槽",
-        )
+        yield event.plain_result(_WMR_USAGE_TEXT)
         return
 
     tokens = split_tokens(arg_text)
     if not tokens:
-        yield event.plain_result(
-            "用法：/wmr <武器> [条件...] 例如：/wmr 绝路 双暴 负任意 12段 r槽",
-        )
+        yield event.plain_result(_WMR_USAGE_TEXT)
         return
 
     weapon_query = tokens[0]
+    weapon: RivenWeapon | None = None
     rest = tokens[1:]
+
+    extracted_weapon = await _extract_weapon_and_rest_tokens(
+        tokens=tokens,
+        riven_weapon_mapper=riven_weapon_mapper,
+    )
+    if extracted_weapon is not None:
+        weapon_query, weapon, rest = extracted_weapon
 
     platform_norm = "pc"
     limit = 10
@@ -152,11 +160,15 @@ async def cmd_wmr(
     positive_stats: list[str] = []
     negative_stats: list[str] = []
     negative_required = False
+    negative_forbidden = False
     mastery_rank_min: int | None = None
     polarity: str | None = None
 
     pending_stats: list[tuple[str, bool]] = []
     unknown_tokens: list[str] = []
+    unresolved_stat_tokens: list[str] = []
+
+    await riven_stat_mapper.initialize()
 
     for t in rest:
         t_norm = _normalize_key(t)
@@ -233,24 +245,28 @@ async def cmd_wmr(
 
         if t_norm in {"负任意", "任意负", "有负", "要负"} or "负任意" in t_norm:
             negative_required = True
+            negative_forbidden = False
             continue
         if t_norm in {"无负", "不要负", "不带负"}:
             negative_required = False
+            negative_forbidden = True
             negative_stats = []
             continue
         if t_norm.startswith("负") and len(t_norm) > 1:
             negative_required = True
+            negative_forbidden = False
             key = t_norm[1:]
-            if key in RIVEN_STAT_ALIASES:
-                url_name = RIVEN_STAT_ALIASES[key]
+            url_name = riven_stat_mapper.resolve_token(key)
+            if url_name:
                 if url_name == "damage_vs_sentient":
                     pending_stats.append((url_name, True))
                 else:
                     negative_stats.append(url_name)
                 continue
 
-        if t_norm in RIVEN_STAT_ALIASES:
-            url_name = RIVEN_STAT_ALIASES[t_norm]
+        direct_url_name = riven_stat_mapper.resolve_token(t_norm)
+        if direct_url_name:
+            url_name = direct_url_name
             if url_name == "damage_vs_sentient":
                 pending_stats.append((url_name, False))
             else:
@@ -265,10 +281,6 @@ async def cmd_wmr(
             continue
 
         unknown_tokens.append(str(t).strip())
-
-    provider_id = str((config or {}).get("unknown_abbrev_provider_id") or "")
-
-    await riven_stat_mapper.initialize()
 
     for url_name, is_negative in pending_stats:
         if riven_stat_mapper.is_valid_url_name(url_name):
@@ -294,42 +306,25 @@ async def cmd_wmr(
         if tok2.startswith("负") and len(tok2) > 1:
             is_negative = True
             negative_required = True
+            negative_forbidden = False
             query_tok = tok2[1:]
 
-        resolved = riven_stat_mapper.resolve_from_alias(
-            query_tok, alias_map=RIVEN_STAT_ALIASES
-        )
-        if not resolved:
-            resolved = await riven_stat_mapper.resolve_with_ai(
-                context=context,
-                event=event,
-                token=query_tok,
-                provider_id=provider_id,
-            )
+        resolved = riven_stat_mapper.resolve_token(query_tok)
 
         if not resolved:
-            parts = await _ai_split_stat_token(
-                context=context,
-                provider_id=provider_id,
-                token=query_tok,
-            )
+            parts = riven_stat_mapper.split_compound_token(query_tok)
+            matched_part = False
             for part in parts:
-                part_resolved = riven_stat_mapper.resolve_from_alias(
-                    part, alias_map=RIVEN_STAT_ALIASES
-                )
-                if not part_resolved:
-                    part_resolved = await riven_stat_mapper.resolve_with_ai(
-                        context=context,
-                        event=event,
-                        token=part,
-                        provider_id=provider_id,
-                    )
+                part_resolved = riven_stat_mapper.resolve_token(part)
                 if not part_resolved:
                     continue
+                matched_part = True
                 if is_negative:
                     negative_stats.append(part_resolved)
                 else:
                     positive_stats.append(part_resolved)
+            if not matched_part:
+                unresolved_stat_tokens.append(tok2)
             continue
 
         if is_negative:
@@ -337,15 +332,24 @@ async def cmd_wmr(
         else:
             positive_stats.append(resolved)
 
+    if unresolved_stat_tokens:
+        unresolved_text = "、".join(unresolved_stat_tokens)
+        yield event.plain_result(f"没有找到相关紫卡词条：{unresolved_text}")
+        return
+
     positive_stats = uniq_lower(positive_stats)
     negative_stats = uniq_lower(negative_stats)
 
-    weapon = await riven_weapon_mapper.resolve_weapon(
-        context=context,
-        event=event,
-        query=weapon_query,
-        provider_id=provider_id,
-    )
+    if negative_forbidden:
+        negative_required = False
+        negative_stats = []
+
+    if weapon is None:
+        weapon = await riven_weapon_mapper.resolve_weapon(
+            context=context,
+            event=event,
+            query=weapon_query,
+        )
     if not weapon:
         yield event.plain_result(
             f"未识别武器：{weapon_query}（可尝试输入英文名，如 soma）"
@@ -374,6 +378,7 @@ async def cmd_wmr(
         positive_stats=positive_stats,
         negative_stats=negative_stats,
         negative_required=bool(negative_required),
+        negative_forbidden=bool(negative_forbidden),
         mastery_rank_min=mastery_rank_min,
         polarity=polarity,
     )
@@ -398,6 +403,7 @@ async def cmd_wmr(
             "positive_stats": list(positive_stats),
             "negative_stats": list(negative_stats),
             "negative_required": bool(negative_required),
+            "negative_forbidden": bool(negative_forbidden),
             "mastery_rank_min": mastery_rank_min,
             "polarity": polarity,
             "reply_msg_id": str(
@@ -415,6 +421,7 @@ async def cmd_wmr(
         positive_stats=list(positive_stats),
         negative_stats=list(negative_stats),
         negative_required=bool(negative_required),
+        negative_forbidden=bool(negative_forbidden),
         mastery_rank_min=mastery_rank_min,
         polarity=polarity,
         page=page,

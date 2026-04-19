@@ -77,16 +77,9 @@ async def cmd_wm(
             language = t_norm.replace("_", "-")
             continue
 
-    provider_id = str((config or {}).get("unknown_abbrev_provider_id") or "")
-
-    item = await term_mapper.resolve_with_ai(
-        context=context,
-        event=event,
-        query=query,
-        provider_id=provider_id,
-    )
+    item = await term_mapper.resolve(query)
     if not item:
-        yield event.plain_result(f"未找到物品：{query}")
+        yield event.plain_result(f"没有找到相关物品：{query}")
         return
     if not item.slug:
         yield event.plain_result("物品信息不完整（缺少 slug），请稍后重试。")

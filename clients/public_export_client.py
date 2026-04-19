@@ -162,6 +162,44 @@ class PublicExportClient:
             "disk_cleared": bool(disk_cleared),
         }
 
+    async def warmup_common_exports(
+        self, *, language: str = "zh"
+    ) -> dict[str, int | bool]:
+        """Best-effort preload for common PublicExport maps used by commands."""
+        lang = (language or "zh").strip().lower() or "zh"
+        index = await self.get_index(language=lang)
+        if index is None:
+            return {
+                "ok": False,
+                "language": lang,
+                "index_files": 0,
+                "unique_names": 0,
+                "regions": 0,
+                "mission_types": 0,
+                "fissure_tiers": 0,
+                "factions": 0,
+                "syndicates": 0,
+            }
+
+        unique_map = await self.get_unique_name_map(language=lang)
+        region_map = await self.get_region_name_map(language=lang)
+        mission_type_map = await self.get_mission_type_map(language=lang)
+        fissure_tier_map = await self.get_fissure_tier_map(language=lang)
+        faction_map = await self.get_faction_map(language=lang)
+        syndicate_map = await self.get_syndicate_tag_map(language=lang)
+
+        return {
+            "ok": True,
+            "language": lang,
+            "index_files": len(index.file_tokens),
+            "unique_names": len(unique_map),
+            "regions": len(region_map),
+            "mission_types": len(mission_type_map),
+            "fissure_tiers": len(fissure_tier_map),
+            "factions": len(faction_map),
+            "syndicates": len(syndicate_map),
+        }
+
     @staticmethod
     def _has_cjk(s: str) -> bool:
         return any("\u4e00" <= ch <= "\u9fff" for ch in (s or ""))
