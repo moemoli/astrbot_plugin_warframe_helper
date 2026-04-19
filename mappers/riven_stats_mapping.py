@@ -10,6 +10,7 @@ from typing import Any
 
 import aiohttp
 
+from astrbot.api import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 from ..http_utils import fetch_json
@@ -97,6 +98,21 @@ class WarframeRivenStatMapper:
         self._stats_by_name: dict[str, list[RivenStat]] = {}
         self._stats_tokens: dict[str, set[str]] = {}
         self._compound_keys: list[str] = []
+        self._debug_logging_enabled = False
+
+    def set_debug_logging_enabled(self, enabled: bool) -> None:
+        self._debug_logging_enabled = bool(enabled)
+
+    def _debug_log(self, action: str, **fields: object) -> None:
+        if not self._debug_logging_enabled:
+            return
+        parts = [f"[WFHelperDebug][RivenStatMapper] {action}"]
+        for k, v in fields.items():
+            s = str(v)
+            if len(s) > 220:
+                s = s[:217] + "..."
+            parts.append(f"{k}={s}")
+        logger.info(" | ".join(parts))
 
     @property
     def cache_path(self) -> Path:
@@ -111,6 +127,11 @@ class WarframeRivenStatMapper:
             [k for k in self._alias_full_names.keys() if len(k) >= 2],
             key=len,
             reverse=True,
+        )
+        self._debug_log(
+            "reload_aliases",
+            aliases=len(self._alias_full_names),
+            compound_keys=len(self._compound_keys),
         )
 
     async def initialize(self) -> None:
@@ -252,10 +273,12 @@ class WarframeRivenStatMapper:
     async def refresh_cache(self) -> int:
         stats = await self._fetch_attributes()
         if not stats:
+            self._debug_log("refresh_cache", status="empty")
             return 0
 
         self._build_indexes(stats)
         self._save_cache()
+        self._debug_log("refresh_cache", status="ok", attributes=len(stats))
         return len(stats)
 
     def is_valid_url_name(self, url_name: str) -> bool:
@@ -277,20 +300,43 @@ class WarframeRivenStatMapper:
     def resolve_token(self, token: str) -> str | None:
         q = str(token or "").strip()
         if not q:
+            self._debug_log("resolve_token", token=q, status="empty")
             return None
 
         key = normalize_alias_key(q)
         if key in self._stats_by_slug:
+            hit = self._stats_by_slug[key]
+            self._debug_log(
+                "resolve_hit",
+                stage="direct_slug",
+                token=q,
+                slug=hit.url_name,
+                effect=hit.effect,
+            )
             return self._stats_by_slug[key].url_name
 
         name_key = _normalize_name_key(q)
         if name_key in self._stats_by_name:
+            hit = self._stats_by_name[name_key][0]
+            self._debug_log(
+                "resolve_hit",
+                stage="name_exact",
+                token=q,
+                slug=hit.url_name,
+                effect=hit.effect,
+            )
             return self._stats_by_name[name_key][0].url_name
 
         alias_full = self._alias_full_names.get(key)
         candidates = [q, _humanize_name(q)]
         if alias_full:
             candidates.insert(0, alias_full)
+        self._debug_log(
+            "resolve_prepare",
+            token=q,
+            alias_full=alias_full,
+            candidate_count=len(candidates),
+        )
 
         dedup_candidates: list[str] = []
         seen: set[str] = set()
@@ -306,10 +352,26 @@ class WarframeRivenStatMapper:
         for c in dedup_candidates:
             slug = normalize_alias_key(_slugify_text(c))
             if slug in self._stats_by_slug:
+                hit = self._stats_by_slug[slug]
+                self._debug_log(
+                    "resolve_hit",
+                    stage="candidate_slug",
+                    candidate=c,
+                    slug=hit.url_name,
+                    effect=hit.effect,
+                )
                 return self._stats_by_slug[slug].url_name
 
             nk = _normalize_name_key(c)
             if nk in self._stats_by_name:
+                hit = self._stats_by_name[nk][0]
+                self._debug_log(
+                    "resolve_hit",
+                    stage="candidate_name",
+                    candidate=c,
+                    slug=hit.url_name,
+                    effect=hit.effect,
+                )
                 return self._stats_by_name[nk][0].url_name
 
         best: RivenStat | None = None
@@ -325,9 +387,24 @@ class WarframeRivenStatMapper:
                     best = stat
 
         if best is None:
+            self._debug_log("resolve_miss", stage="global_score", reason="no_best_item")
             return None
         if best_score < 80:
+            self._debug_log(
+                "resolve_miss",
+                stage="global_score",
+                reason="score_below_threshold",
+                best_score=best_score,
+                threshold=80,
+            )
             return None
+        self._debug_log(
+            "resolve_hit",
+            stage="global_score",
+            best_score=best_score,
+            slug=best.url_name,
+            effect=best.effect,
+        )
         return best.url_name
 
     def resolve_from_alias(
@@ -359,6 +436,12 @@ class WarframeRivenStatMapper:
             if isinstance(p, str) and p.strip()
         ]
         if len(direct_parts) > 1:
+            self._debug_log(
+                "split_compound_token",
+                token=tok,
+                mode="direct_split",
+                parts=direct_parts,
+            )
             return direct_parts
 
         norm = normalize_alias_key(tok)
@@ -380,6 +463,18 @@ class WarframeRivenStatMapper:
             i += 1
 
         if out:
+            self._debug_log(
+                "split_compound_token",
+                token=tok,
+                mode="compound_match",
+                parts=out,
+            )
             return out
+        self._debug_log(
+            "split_compound_token",
+            token=tok,
+            mode="fallback_single",
+            parts=[tok],
+        )
         return [tok]
 

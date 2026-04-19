@@ -1,92 +1,82 @@
 {
-    "proxy_url": {
-        "type": "string",
-        "default": "",
-        "description": "HTTP 代理（可选）",
-        "hint": "为空时使用系统/环境代理（aiohttp trust_env）。非空时将强制所有插件请求使用该代理。格式示例：http://127.0.0.1:7890"
-    },
-    "direct_domains": {
-        "type": "list",
-        "default": [],
-        "description": "直连域名列表（绕过插件代理）",
-        "hint": "当 proxy_url 非空时，匹配此列表的域名将不使用 proxy_url。支持通配符，例如：x.com、*.x.com。注意：*.x.com 仅匹配子域名，不匹配根域名 x.com。"
-    },
-    "warframestat_api_bases": {
-        "type": "list",
-        "default": [
-            "https://api.warframestat.us"
-        ],
-        "description": "WarframeStat API 基础地址列表",
-        "hint": "用于仲裁/电波回退数据源。可填写你自建反向代理地址（如 https://stat.example.com）。插件会按顺序尝试：{base}/{platform}/{endpoint}。"
-    },
-    "warframestat_proxy_bases": {
-        "type": "list",
-        "default": [
-            "https://r.jina.ai/http://api.warframestat.us"
-        ],
-        "description": "WarframeStat 代理地址列表（可选）",
-        "hint": "当 API 基础地址不可达时使用的二级回退源。可留空，或填写你自己的代理地址。"
-    },
-    "unknown_abbrev_provider_id": {
-        "type": "string",
-        "default": "",
-        "_special": "select_provider",
-        "description": "解析模型",
-        "hint": "在wm/wmr等指令中，当用户输入了无法识别的缩写时，插件会使用该解析模型尝试解析。"
-    },
-    "render_template_name": {
-        "type": "string",
-        "default": "default",
-        "description": "渲染模板名称",
-        "hint": "用于选择 HTML 模板目录名。插件会读取 assets/template/<模板名>/ 下的 status_list.html、cycle_status.html、wm.html、wmr.html；若不存在则回退到 assets/template/default/。"
-    },
-    "image_cache_dir": {
-        "type": "string",
-        "default": "",
-        "description": "图片缓存目录",
-        "hint": "渲染图片的缓存目录。为空时使用 AstrBot 默认临时目录；支持绝对路径，或相对于默认临时目录的相对路径。"
-    },
-    "enable_no_prefix_commands": {
+  "proxy_url": {
+    "type": "string",
+    "default": "",
+    "description": "HTTP 代理（可选）",
+    "hint": "为空时使用系统/环境代理（aiohttp trust_env）。非空时将强制所有插件请求使用该代理。格式示例：http://127.0.0.1:7890"
+  },
+  "direct_domains": {
+    "type": "list",
+    "default": [],
+    "description": "直连域名列表（绕过插件代理）",
+    "hint": "当 proxy_url 非空时，匹配此列表的域名将不使用 proxy_url。支持通配符，例如：x.com、*.x.com。注意：*.x.com 仅匹配子域名，不匹配根域名 x.com。"
+  },
+  "warframestat_api_bases": {
+    "type": "list",
+    "default": ["https://api.warframestat.us"],
+    "description": "WarframeStat API 基础地址列表",
+    "hint": "用于仲裁/电波回退数据源。可填写你自建反向代理地址（如 https://stat.example.com）。插件会按顺序尝试：{base}/{platform}/{endpoint}。"
+  },
+  "unknown_abbrev_provider_id": {
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "description": "解析模型",
+    "hint": "在wm/wmr等指令中，当用户输入了无法识别的缩写时，插件会使用该解析模型尝试解析。"
+  },
+  "render_template_name": {
+    "type": "string",
+    "default": "default",
+    "description": "渲染模板名称",
+    "hint": "用于选择 HTML 模板目录名。插件会读取 assets/template/<模板名>/ 下的 status_list.html、cycle_status.html、wm.html、wmr.html；若不存在则回退到 assets/template/default/。"
+  },
+  "image_cache_dir": {
+    "type": "string",
+    "default": "",
+    "description": "图片缓存目录",
+    "hint": "渲染图片的缓存目录。为空时使用 AstrBot 默认临时目录；支持绝对路径，或相对于默认临时目录的相对路径。"
+  },
+  "enable_no_prefix_commands": {
+    "type": "bool",
+    "default": false,
+    "description": "启用无前缀指令触发",
+    "hint": "开启后，插件指令可不依赖 AstrBot 全局前缀直接触发（例如直接发送“电波”“wm 猴p”）。关闭时保持原有仅前缀触发行为。"
+  },
+  "debug_logging": {
+    "type": "bool",
+    "default": false,
+    "description": "启用详细调试日志",
+    "hint": "开启后会输出消息接收、路由命中/跳过原因、交互按钮处理等详细日志（日志前缀 [WFHelperDebug]）。用于排查‘指令无反应’问题，建议仅在排障时开启。"
+  },
+  "qq_official": {
+    "description": "QQ官方机器人配置",
+    "type": "object",
+    "hint": "QQ官方机器人相关配置",
+    "items": {
+      "webhook_enable_markdown_reply": {
         "type": "bool",
         "default": false,
-        "description": "启用无前缀指令触发",
-        "hint": "开启后，插件指令可不依赖 AstrBot 全局前缀直接触发（例如直接发送“电波”“wm 猴p”）。关闭时保持原有仅前缀触发行为。"
-    },
-    "qq_official": {
-        "description": "QQ官方机器人配置",
-        "type": "object",
-        "hint": "QQ官方机器人相关配置",
-        "items": {
-            "webhook_enable_markdown_reply": {
-                "type": "bool",
-                "default": false,
-                "description": "启用 Markdown 回复",
-                "hint": "开启后：QQ 官方 Webhook 平台将使用 Markdown 模板回复，并启用翻页消息按钮（需要按钮 action.type=1 回调，button_data 建议为 wfp:prev / wfp:next）。关闭后：保持原有纯文本/图片回复逻辑。"
-            },
-            "webhook_pager_keyboard_template_id": {
-                "type": "string",
-                "default": "",
-                "description": "翻页按钮模板 ID",
-                "hint": "用于 /wm 与 /wmr 的翻页按钮（上一页/下一页）。按钮模板需在 QQ 官方后台创建，并配置按钮发送文本：/wfp prev 与 /wfp next（或仅发送 上一页/下一页）。"
-            },
-            "webhook_markdown_template_id": {
-                "type": "string",
-                "default": "",
-                "description": "Markdown 模板 ID",
-                "hint": "在 QQ 官方后台创建 Markdown 消息模板后获得。插件会用该模板发送翻页提示/通知（模板参数 key 见插件 README 或对话说明）。"
-            },
-            "webhook_public_base_url": {
-                "type": "string",
-                "default": "",
-                "description": "公网访问地址 (Base URL)",
-                "hint": "用于在 QQ 官方 Webhook 平台发送‘单条 Markdown(含图)+翻页按钮’消息时，把本地渲染图片转换为可公网访问的 URL（会拼成 {base}/api/file/<token>）。需要在 QQ 后台将该域名加入消息 URL 白名单。"
-            },
-            "debug_logging": {
-                "type": "bool",
-                "default": false,
-                "description": "启用 QQ 官方 Bot 详细调试日志",
-                "hint": "开启后会输出消息接收、路由命中/跳过原因、交互按钮处理等详细日志（日志前缀 [WFHelperDebug]）。用于排查‘指令无反应’问题，建议仅在排障时开启。"
-            }
-        }
+        "description": "启用 Markdown 回复",
+        "hint": "开启后：QQ 官方 Webhook 平台将使用 Markdown 模板回复，并启用翻页消息按钮（需要按钮 action.type=1 回调，button_data 建议为 wfp:prev / wfp:next）。关闭后：保持原有纯文本/图片回复逻辑。"
+      },
+      "webhook_pager_keyboard_template_id": {
+        "type": "string",
+        "default": "",
+        "description": "翻页按钮模板 ID",
+        "hint": "用于 /wm 与 /wmr 的翻页按钮（上一页/下一页）。按钮模板需在 QQ 官方后台创建，并配置按钮发送文本：/wfp prev 与 /wfp next（或仅发送 上一页/下一页）。"
+      },
+      "webhook_markdown_template_id": {
+        "type": "string",
+        "default": "",
+        "description": "Markdown 模板 ID",
+        "hint": "在 QQ 官方后台创建 Markdown 消息模板后获得。插件会用该模板发送翻页提示/通知（模板参数 key 见插件 README 或对话说明）。"
+      },
+      "webhook_public_base_url": {
+        "type": "string",
+        "default": "",
+        "description": "公网访问地址 (Base URL)",
+        "hint": "用于在 QQ 官方 Webhook 平台发送‘单条 Markdown(含图)+翻页按钮’消息时，把本地渲染图片转换为可公网访问的 URL（会拼成 {base}/api/file/<token>）。需要在 QQ 后台将该域名加入消息 URL 白名单。"
+      }
     }
+  }
 }

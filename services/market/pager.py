@@ -13,6 +13,7 @@ from .pager_common import (
     rank_wmr_auctions,
     render_wm_page_image,
     render_wmr_page_image,
+    resort_wmr_auctions_by_presence,
 )
 
 
@@ -250,6 +251,7 @@ async def cmd_wfp(
             mastery_rank_min=mastery_rank_min,
             polarity=polarity,
         )
+        ranked = resort_wmr_auctions_by_presence(ranked)
 
         rendered, top, summary = await render_wmr_page_image(
             weapon=weapon,

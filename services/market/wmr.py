@@ -13,7 +13,11 @@ from ...constants import market_status_to_cn
 from ...helpers import split_tokens, uniq_lower
 from ...mappers.riven_mapping import RivenWeapon, WarframeRivenWeaponMapper
 from ...mappers.riven_stats_mapping import WarframeRivenStatMapper
-from .pager_common import rank_wmr_auctions, render_wmr_page_image
+from .pager_common import (
+    rank_wmr_auctions,
+    render_wmr_page_image,
+    resort_wmr_auctions_by_presence,
+)
 
 
 _WMR_USAGE_TEXT = (
@@ -382,6 +386,7 @@ async def cmd_wmr(
         mastery_rank_min=mastery_rank_min,
         polarity=polarity,
     )
+    ranked = resort_wmr_auctions_by_presence(ranked)
 
     limit = max(1, min(int(limit), 20))
     page = 1

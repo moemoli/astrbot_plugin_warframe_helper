@@ -173,6 +173,17 @@ def rank_wmr_auctions(
 
     return [a for _, a in scored]
 
+def resort_wmr_auctions_by_presence(
+    auctions: list[RivenAuction],
+) -> list[RivenAuction]:
+    """Stable resort: put ingame/online sellers first without breaking prior rank order within same status tier."""
+    return sorted(
+        list(auctions),
+        key=lambda a: (
+            presence_rank(a.owner_status),
+        ),
+    )
+
 
 def build_wmr_summary(
     *,

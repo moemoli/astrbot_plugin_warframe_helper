@@ -167,6 +167,21 @@ class WarframeTermMapper:
         self._items_token_index: dict[str, set[str]] = {}
 
         self._loaded = False
+        self._debug_logging_enabled = False
+
+    def set_debug_logging_enabled(self, enabled: bool) -> None:
+        self._debug_logging_enabled = bool(enabled)
+
+    def _debug_log(self, action: str, **fields: object) -> None:
+        if not self._debug_logging_enabled:
+            return
+        parts = [f"[WFHelperDebug][TermMapper] {action}"]
+        for k, v in fields.items():
+            s = str(v)
+            if len(s) > 220:
+                s = s[:217] + "..."
+            parts.append(f"{k}={s}")
+        logger.info(" | ".join(parts))
 
     @property
     def items_cache_path(self) -> Path:
@@ -195,6 +210,11 @@ class WarframeTermMapper:
         )
         self._base_alias_keys = set(base_aliases.keys())
         self._alias_full_names = merged_aliases
+        self._debug_log(
+            "reload_aliases",
+            base_aliases=len(self._base_alias_keys),
+            merged_aliases=len(self._alias_full_names),
+        )
 
     def upsert_alias(self, *, alias: str, full_name: str) -> tuple[str, str]:
         key, value = self._nickname_registry.upsert_alias(
@@ -385,10 +405,12 @@ class WarframeTermMapper:
     async def refresh_items_cache(self) -> int:
         items = await self._fetch_items_v2()
         if not items:
+            self._debug_log("refresh_items_cache", status="empty")
             return 0
 
         self._build_indexes(items)
         self._save_items_cache()
+        self._debug_log("refresh_items_cache", status="ok", items=len(items))
         return len(items)
 
     def _resolve_alias(self, query: str) -> tuple[str | None, str, str]:
@@ -609,17 +631,42 @@ class WarframeTermMapper:
 
     def _resolve_prepared(self, prepared: _PreparedItemQuery) -> MarketItem | None:
         if not self._items:
+            self._debug_log("resolve_prepared", query=prepared.raw_query, status="no_items")
             return None
 
         candidates = self._build_name_candidates(prepared)
+        self._debug_log(
+            "resolve_prepared_start",
+            query=prepared.raw_query,
+            alias_key=prepared.alias_key,
+            canonical=prepared.canonical_name,
+            candidates=candidates[:8],
+            candidate_count=len(candidates),
+        )
 
         direct_slug_key = normalize_alias_key(prepared.raw_query)
         if direct_slug_key in self._items_by_slug:
+            hit = self._items_by_slug[direct_slug_key]
+            self._debug_log(
+                "resolve_hit",
+                stage="direct_slug",
+                query=prepared.raw_query,
+                slug=hit.slug,
+                name=hit.name,
+            )
             return self._items_by_slug[direct_slug_key]
 
         for cand in candidates:
             slug = _slugify_text(cand)
             if slug and slug in self._items_by_slug:
+                hit = self._items_by_slug[slug]
+                self._debug_log(
+                    "resolve_hit",
+                    stage="candidate_slug",
+                    candidate=cand,
+                    slug=hit.slug,
+                    name=hit.name,
+                )
                 return self._items_by_slug[slug]
 
         for cand in candidates:
@@ -630,6 +677,13 @@ class WarframeTermMapper:
             if not matches:
                 continue
             if len(matches) == 1:
+                self._debug_log(
+                    "resolve_hit",
+                    stage="name_exact_single",
+                    candidate=cand,
+                    slug=matches[0].slug,
+                    name=matches[0].name,
+                )
                 return matches[0]
 
             best_match = None
@@ -645,6 +699,14 @@ class WarframeTermMapper:
                     best_score = score
                     best_match = m
             if best_match is not None:
+                self._debug_log(
+                    "resolve_hit",
+                    stage="name_exact_scored",
+                    candidate=cand,
+                    best_score=best_score,
+                    slug=best_match.slug,
+                    name=best_match.name,
+                )
                 return best_match
 
         best_item: MarketItem | None = None
@@ -664,9 +726,24 @@ class WarframeTermMapper:
                     best_item = item
 
         if best_item is None:
+            self._debug_log("resolve_miss", stage="global_score", reason="no_best_item")
             return None
         if best_score < 80:
+            self._debug_log(
+                "resolve_miss",
+                stage="global_score",
+                reason="score_below_threshold",
+                best_score=best_score,
+                threshold=80,
+            )
             return None
+        self._debug_log(
+            "resolve_hit",
+            stage="global_score",
+            best_score=best_score,
+            slug=best_item.slug,
+            name=best_item.name,
+        )
         return best_item
 
     async def resolve(self, query: str) -> MarketItem | None:
@@ -699,6 +776,14 @@ class WarframeTermMapper:
             canonical_full_name=prepared.canonical_name,
             matched_item_name=(item.name if item else None),
             matched_slug=(item.slug if item else None),
+        )
+        self._debug_log(
+            "resolve_with_trace",
+            query=q,
+            alias_key=trace.alias_key,
+            canonical=trace.canonical_full_name,
+            matched_name=trace.matched_item_name,
+            matched_slug=trace.matched_slug,
         )
         return item, trace
 

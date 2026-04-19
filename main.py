@@ -193,6 +193,11 @@ def _parse_enable_no_prefix_commands(config: dict | None) -> bool:
     return bool(cfg.get("enable_no_prefix_commands"))
 
 
+def _parse_debug_logging(config: dict | None) -> bool:
+    cfg = config or {}
+    return bool(cfg.get("debug_logging"))
+
+
 def _parse_image_cache_config(config: dict | None) -> str:
     cfg = config or {}
     cache_dir = str(cfg.get("image_cache_dir") or "").strip()
@@ -408,8 +413,13 @@ class WarframeHelperPlugin(Star):
         self._pager_cache = EventScopedTTLCache(ttl_sec=10 * 60)
 
         qq_cfg = _parse_qq_webhook_config(self.config)
-        self._debug_logging_enabled = bool(qq_cfg.debug_logging)
+        self._debug_logging_enabled = bool(
+            _parse_debug_logging(self.config) or qq_cfg.debug_logging
+        )
         set_debug_logging_enabled(self._debug_logging_enabled)
+        self.term_mapper.set_debug_logging_enabled(self._debug_logging_enabled)
+        self.riven_weapon_mapper.set_debug_logging_enabled(self._debug_logging_enabled)
+        self.riven_stat_mapper.set_debug_logging_enabled(self._debug_logging_enabled)
         # QQ official webhook keyboard template id (message buttons).
         # Note: QQ button templates do NOT support variables.
         qq_tpl = (
@@ -1113,7 +1123,7 @@ class WarframeHelperPlugin(Star):
             f"图片缓存已删除 {img_removed} 个"
             + (f"（失败 {img_failed} 个）；" if img_failed > 0 else "；")
             + "WFM 缓存刷新："
-            f"items {items_n}，lich weapons {lich_weapons_n}，riven attributes {riven_attrs_n}；"
+            f"items {items_n}，merged weapons(riven/lich/sister) {lich_weapons_n}，riven attributes {riven_attrs_n}；"
             + "PublicExport 预热："
             + (
                 f"index {int(pe_stats.get('index_files', 0))}，"
@@ -1144,7 +1154,7 @@ class WarframeHelperPlugin(Star):
 
         return event.plain_result(
             "/wm 刷新缓存完成："
-            f"items {items_n}，lich weapons {lich_weapons_n}，riven attributes {riven_attrs_n}；"
+            f"items {items_n}，merged weapons(riven/lich/sister) {lich_weapons_n}，riven attributes {riven_attrs_n}；"
             + "PublicExport 预热："
             + (
                 f"index {int(pe_stats.get('index_files', 0))}，"
@@ -1817,7 +1827,7 @@ class WarframeHelperPlugin(Star):
         async for output in self._yield_result_and_cleanup_image(result):
             yield output
 
-    @filter.command("轮回奖励", alias={"双衍轮回", "双衍轮回奖励", "circuit"})
+    @filter.command("轮回奖励", alias={"双衍轮回", "双衍轮回奖励", "circuit","本周轮换"})
     async def wf_duviri_circuit_rewards(
         self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()
     ):
