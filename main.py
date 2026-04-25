@@ -49,6 +49,7 @@ from .services.subscriptions import SubscriptionService
 QQ_OFFICIAL_WEBHOOK_PAGER_TEMPLATE_ID_DEFAULT = ""
 _DEBUG_LOGGING_ENABLED = False
 _RENDER_TEMPLATE_RESOLVER: Callable[[AstrMessageEvent], str | None] | None = None
+NICKNAME_DEFAULT_REMOTE_URL = "https://gh-proxy.org/https://raw.githubusercontent.com/moemoli/astrbot_plugin_warframe_helper/refs/heads/master/assets/warframe_nicknames.default.json"
 
 
 def set_debug_logging_enabled(enabled: bool) -> None:
@@ -1031,21 +1032,21 @@ class WarframeHelperPlugin(Star):
             yield output
 
     @filter.command("简称补充")
-    async def wf_add_alias(self, event: AstrMessageEvent, alias: str ,full:str):
+    async def wf_add_alias(self, event: AstrMessageEvent, alias:str,full_name:str):
         """管理员补充简称映射。用法：/简称补充 <简称> <全称>"""
 
         _safe_disable_llm(event, reason="/简称补充")
 
         if not event.is_admin():
-            yield event.plain_result("/简称补充 仅限 astradmin 使用。")
+            yield event.plain_result("/简称补充 仅限管理员使用。")
             return
 
-        if not alias or not full:
+        if not alias or not full_name:
             yield event.plain_result("用法：/简称补充 [简称] [全称]")
             return
 
         try:
-            _, _ = self.term_mapper.upsert_alias(alias=alias, full_name=full)
+            _, _ = self.term_mapper.upsert_alias(alias=alias, full_name=full_name)
             self.term_mapper.reload_aliases()
             self.riven_weapon_mapper.reload_aliases()
             self.riven_stat_mapper.reload_aliases()
@@ -1055,8 +1056,9 @@ class WarframeHelperPlugin(Star):
 
         yield event.plain_result(
             "简称补充成功："
-            f"{alias} -> {full}\n"
-            f"简称文件：{self.term_mapper.nickname_file_path}"
+            f"{alias} -> {full_name}\n"
+            f"插件简称表：{self.term_mapper.nickname_default_file_path}\n"
+            f"数据简称表：{self.term_mapper.nickname_file_path}"
         )
 
     @filter.command_group("wf")
@@ -1104,6 +1106,9 @@ class WarframeHelperPlugin(Star):
         items_n = await self.term_mapper.refresh_items_cache()
         lich_weapons_n = await self.riven_weapon_mapper.refresh_cache()
         riven_attrs_n = await self.riven_stat_mapper.refresh_cache()
+        nick_stats = await self.term_mapper.refresh_nickname_table_from_url(
+            NICKNAME_DEFAULT_REMOTE_URL
+        )
 
         self.term_mapper.reload_aliases()
         self.riven_weapon_mapper.reload_aliases()
@@ -1125,6 +1130,12 @@ class WarframeHelperPlugin(Star):
                 if bool(pe_stats.get("ok", False))
                 else "失败（索引不可用或网络异常）。"
             )
+            + "简称表刷新："
+            + (
+                f"成功（base {int(nick_stats.get('base_aliases', 0))}，user {int(nick_stats.get('user_aliases', 0))}）。"
+                if bool(nick_stats.get("ok", False))
+                else f"失败（{nick_stats.get('reason', 'unknown')}）。"
+            )
         )
 
     async def _handle_wm_refresh(self, event: AstrMessageEvent):
@@ -1134,15 +1145,23 @@ class WarframeHelperPlugin(Star):
         items_n = await self.term_mapper.refresh_items_cache()
         lich_weapons_n = await self.riven_weapon_mapper.refresh_cache()
         riven_attrs_n = await self.riven_stat_mapper.refresh_cache()
+        nick_stats = await self.term_mapper.refresh_nickname_table_from_url(
+            NICKNAME_DEFAULT_REMOTE_URL
+        )
 
         self.term_mapper.reload_aliases()
         self.riven_weapon_mapper.reload_aliases()
         self.riven_stat_mapper.reload_aliases()
         pe_stats = await self._warmup_public_export(reason="wm_refresh")
 
-        if items_n <= 0 and lich_weapons_n <= 0 and riven_attrs_n <= 0:
+        if (
+            items_n <= 0
+            and lich_weapons_n <= 0
+            and riven_attrs_n <= 0
+            and not bool(nick_stats.get("ok", False))
+        ):
             return event.plain_result(
-                "/wm 刷新缓存失败：未从 warframe.market 拉取到有效数据，请稍后重试。"
+                "/wm 刷新缓存失败：未从 warframe.market 拉取到有效数据，且简称表刷新失败，请稍后重试。"
             )
 
         return event.plain_result(
@@ -1155,6 +1174,12 @@ class WarframeHelperPlugin(Star):
                 f"regions {int(pe_stats.get('regions', 0))}。\n"
                 if bool(pe_stats.get("ok", False))
                 else "失败（索引不可用或网络异常）。\n"
+            )
+            + "简称表刷新："
+            + (
+                f"成功（base {int(nick_stats.get('base_aliases', 0))}，user {int(nick_stats.get('user_aliases', 0))}）。\n"
+                if bool(nick_stats.get("ok", False))
+                else f"失败（{nick_stats.get('reason', 'unknown')}）。\n"
             )
             + f"items 缓存：{self.term_mapper.items_cache_path}"
         )

@@ -191,6 +191,10 @@ class WarframeTermMapper:
     def nickname_file_path(self) -> Path:
         return self._nickname_registry.path
 
+    @property
+    def nickname_default_file_path(self) -> Path:
+        return self._nickname_registry.default_path
+
     async def initialize(self) -> None:
         if self._loaded:
             return
@@ -217,13 +221,19 @@ class WarframeTermMapper:
         )
 
     def upsert_alias(self, *, alias: str, full_name: str) -> tuple[str, str]:
-        key, value = self._nickname_registry.upsert_alias(
+        key, value = self._nickname_registry.upsert_default_alias(
             alias=alias,
             full_name=full_name,
-            section=USER_ALIASES,
+            section=SYM_BASE_NICKNAMES,
+            sync_to_data=True,
         )
         self.reload_aliases()
         return key, value
+
+    async def refresh_nickname_table_from_url(self, url: str) -> dict[str, Any]:
+        result = await self._nickname_registry.refresh_default_from_url(url=url)
+        self.reload_aliases()
+        return result
 
     def _iter_item_names(self, item: MarketItem) -> list[str]:
         out: list[str] = [item.name, item.slug.replace("_", " ")]
