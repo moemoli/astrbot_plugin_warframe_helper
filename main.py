@@ -1031,7 +1031,7 @@ class WarframeHelperPlugin(Star):
             yield output
 
     @filter.command("简称补充")
-    async def wf_add_alias(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
+    async def wf_add_alias(self, event: AstrMessageEvent, alias: str ,full:str):
         """管理员补充简称映射。用法：/简称补充 <简称> <全称>"""
 
         _safe_disable_llm(event, reason="/简称补充")
@@ -1040,19 +1040,12 @@ class WarframeHelperPlugin(Star):
             yield event.plain_result("/简称补充 仅限 astradmin 使用。")
             return
 
-        raw = str(args or "").strip()
-        parts = raw.split(maxsplit=1)
-        if len(parts) != 2:
-            yield event.plain_result("用法：/简称补充 [简称] [全称]")
-            return
-
-        alias, full_name = parts[0].strip(), parts[1].strip()
-        if not alias or not full_name:
+        if not alias or not full:
             yield event.plain_result("用法：/简称补充 [简称] [全称]")
             return
 
         try:
-            _, _ = self.term_mapper.upsert_alias(alias=alias, full_name=full_name)
+            _, _ = self.term_mapper.upsert_alias(alias=alias, full_name=full)
             self.term_mapper.reload_aliases()
             self.riven_weapon_mapper.reload_aliases()
             self.riven_stat_mapper.reload_aliases()
@@ -1062,7 +1055,7 @@ class WarframeHelperPlugin(Star):
 
         yield event.plain_result(
             "简称补充成功："
-            f"{alias} -> {full_name}\n"
+            f"{alias} -> {full}\n"
             f"简称文件：{self.term_mapper.nickname_file_path}"
         )
 
