@@ -654,6 +654,9 @@ class WarframeHelperPlugin(Star):
             "夜波": self.wf_nightwave,
             "nightwave": self.wf_nightwave,
             "平原": self.wf_plains,
+            "赏金": self.wf_bounty,
+            "bounty": self.wf_bounty,
+            "希图斯赏金": self.wf_cetus_bounty,
             "夜灵平原": self.wf_cetus_cycle,
             "希图斯": self.wf_cetus_cycle,
             "cetus": self.wf_cetus_cycle,
@@ -1205,7 +1208,7 @@ class WarframeHelperPlugin(Star):
             ),
             WorldstateRow(
                 title="世界状态（事件）",
-                subtitle="/入侵（别名：invasions）/集团（别名：syndicate）",
+                subtitle="/入侵（别名：invasions）/集团（别名：syndicate）/赏金（别名：希图斯赏金）",
             ),
             WorldstateRow(
                 title="循环",
@@ -2021,6 +2024,53 @@ class WarframeHelperPlugin(Star):
             result=result,
             title="集团",
             kind="/集团",
+        ):
+            yield event.make_result().stop_event()
+            return
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
+
+    @filter.command("赏金", alias={"bounty"})
+    async def wf_bounty(self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()):
+        """查询平原赏金任务。用法：/赏金 [希图斯/福尔图娜/魔胎] [平台]"""
+
+        _safe_disable_llm(event, reason="/赏金")
+        result = await worldstate_commands.cmd_bounties(
+            event=event,
+            raw_args=str(args),
+            worldstate_client=self.worldstate_client,
+        )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="赏金",
+            kind="/赏金",
+        ):
+            yield event.make_result().stop_event()
+            return
+        async for output in self._yield_result_and_cleanup_image(result):
+            yield output
+
+    @filter.command("希图斯赏金")
+    async def wf_cetus_bounty(
+        self, event: AstrMessageEvent, args: GreedyStr = GreedyStr()
+    ):
+        """快捷指令：/希图斯赏金 = /赏金 希图斯"""
+
+        _safe_disable_llm(event, reason="/赏金")
+        merged_args = " ".join(
+            [x for x in ["希图斯", str(args).strip()] if isinstance(x, str) and x]
+        ).strip()
+        result = await worldstate_commands.cmd_bounties(
+            event=event,
+            raw_args=merged_args,
+            worldstate_client=self.worldstate_client,
+        )
+        if await self._try_send_qq_markdown_for_result(
+            event=event,
+            result=result,
+            title="赏金",
+            kind="/赏金",
         ):
             yield event.make_result().stop_event()
             return

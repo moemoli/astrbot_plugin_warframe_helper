@@ -4,7 +4,11 @@ import re
 
 from astrbot.api.event import AstrMessageEvent
 
-from ..clients.worldstate_client import WarframeWorldstateClient
+from ..clients.worldstate_client import (
+    SyndicateInfo,
+    SyndicateJob,
+    WarframeWorldstateClient,
+)
 from ..constants import WORLDSTATE_PLATFORM_ALIASES
 from ..helpers import split_tokens
 from ..renderers.worldstate_render import (
@@ -1274,4 +1278,189 @@ async def cmd_syndicates(
             mtype = j.mission_type or "?"
             lines.append(f"  - {mtype} - {node}")
 
+    return event.plain_result("\n".join(lines))
+
+
+async def cmd_bounties(
+    *,
+    event: AstrMessageEvent,
+    raw_args: str,
+    worldstate_client: WarframeWorldstateClient,
+):
+    raw_tokens = split_tokens(str(raw_args))
+    platform_norm = worldstate_platform_from_tokens(raw_tokens)
+
+    platform_tokens = {
+        _normalize_compact(k) for k in WORLDSTATE_PLATFORM_ALIASES.keys() if k
+    } | {_normalize_compact(v) for v in WORLDSTATE_PLATFORM_ALIASES.values() if v}
+
+    query_tokens = [
+        t for t in raw_tokens if _normalize_compact(t) not in platform_tokens
+    ]
+    query = "".join([str(t).strip() for t in query_tokens if str(t).strip()])
+    qn = _normalize_compact(query)
+
+    plains: list[tuple[str, set[str], set[str]]] = [
+        (
+            "希图斯",
+            {"希图斯", "夜灵平原", "cetus", "poe"},
+            {"希图斯", "奥斯顿", "cetussyndicate", "ostrons"},
+        ),
+        (
+            "福尔图娜",
+            {"福尔图娜", "奥布山谷", "金星平原", "vallis", "orb", "fortuna"},
+            {
+                "福尔图娜",
+                "索拉里斯联合",
+                "solaris",
+                "solarisunited",
+                "solarissyndicate",
+            },
+        ),
+        (
+            "魔胎之境",
+            {"魔胎之境", "魔胎", "deimos", "cambion", "entrati"},
+            {"英择谛", "entrati", "entratisyndicate"},
+        ),
+    ]
+
+    def match_plain(q: str) -> list[tuple[str, set[str], set[str]]]:
+        if not q:
+            return []
+        hits: list[tuple[str, set[str], set[str]]] = []
+        for plain_name, aliases_raw, _ in plains:
+            name_norm = _normalize_compact(plain_name)
+            aliases = {_normalize_compact(str(x)) for x in aliases_raw}
+            if q in name_norm or any(q in x for x in aliases):
+                hits.append((plain_name, aliases_raw, _))
+        return hits
+
+    matched_plain: tuple[str, set[str], set[str]] | None = None
+    if qn:
+        matched = match_plain(qn)
+        if not matched:
+            return event.plain_result(
+                "未识别平原名称。用法：/赏金 [希图斯/福尔图娜/魔胎] [平台]"
+            )
+        if len(matched) > 1:
+            names = "、".join([m[0] for m in matched])
+            return event.plain_result(f"匹配到多个平原：{names}。请更具体一些。")
+        matched_plain = matched[0]
+
+    syndicates = await worldstate_client.fetch_syndicates(
+        platform=platform_norm, language="zh"
+    )
+    if syndicates is None:
+        return event.plain_result(
+            "未获取到赏金任务信息（可能是网络限制或接口不可达）。"
+        )
+    if not syndicates:
+        return event.plain_result(f"当前无赏金任务（{platform_norm}）。")
+
+    def is_bounty_name(name: str, plain_spec: tuple[str, set[str], set[str]]) -> bool:
+        n = _normalize_compact(name)
+        _, _, syndicates_raw = plain_spec
+        keys = {_normalize_compact(str(x)) for x in syndicates_raw if str(x).strip()}
+        if n in keys:
+            return True
+        return any(k and k in n for k in keys)
+
+    def bounty_jobs_of(s: SyndicateInfo) -> list[SyndicateJob]:
+        return [j for j in (s.jobs or ()) if (j.mission_type or "").strip() == "赏金"]
+
+    plain_items: list[
+        tuple[tuple[str, set[str], set[str]], SyndicateInfo, list[SyndicateJob]]
+    ] = []
+    for plain in plains:
+        candidates = [s for s in syndicates if is_bounty_name(s.name, plain)]
+        if not candidates:
+            continue
+        candidates.sort(key=lambda x: len(bounty_jobs_of(x)), reverse=True)
+        picked = candidates[0]
+        plain_items.append((plain, picked, bounty_jobs_of(picked)))
+
+    if matched_plain is not None:
+        picked = next(
+            (x for x in plain_items if x[0][0] == matched_plain[0]),
+            None,
+        )
+        plain_name = matched_plain[0]
+        if picked is None or not picked[2]:
+            return event.plain_result(f"{plain_name} 当前无赏金任务（{platform_norm}）。")
+
+        _, info, jobs = picked
+        rows: list[WorldstateRow] = []
+        for j in jobs[:18]:
+            node = j.node or "?"
+            rows.append(
+                WorldstateRow(
+                    title=f"赏金 - {node}",
+                    right=f"剩余{j.eta}" if j.eta else None,
+                )
+            )
+
+        rendered = await render_worldstate_rows_image_to_file(
+            title=f"{plain_name}赏金",
+            header_lines=[
+                f"平台：{platform_norm}",
+                f"集团：{info.name}",
+                f"剩余：{info.eta}",
+                f"共{len(jobs)}条（展示前{min(18, len(jobs))}条）",
+            ],
+            rows=rows,
+            accent=(245, 158, 11, 255),
+        )
+        if rendered:
+            return event.image_result(rendered.path)
+
+        lines = [
+            f"{plain_name}赏金（{platform_norm}）剩余{info.eta}：共{len(jobs)}条"
+        ]
+        for j in jobs:
+            node = j.node or "?"
+            lines.append(f"- 赏金 - {node} | 剩余{j.eta}")
+        return event.plain_result("\n".join(lines))
+
+    rows: list[WorldstateRow] = []
+    for plain, info, jobs in plain_items:
+        plain_name = plain[0] or info.name or "平原"
+        if jobs:
+            subtitle = " | ".join([f"赏金-{(j.node or '?')}" for j in jobs[:3]])
+            right = f"剩余{info.eta}"
+            tag = f"共{len(jobs)}条"
+        else:
+            subtitle = "当前无赏金任务"
+            right = f"剩余{info.eta}" if info.eta else None
+            tag = "共0条"
+
+        rows.append(
+            WorldstateRow(
+                title=plain_name,
+                subtitle=subtitle,
+                right=right,
+                tag=tag,
+            )
+        )
+
+    if not rows:
+        return event.plain_result(f"当前无平原赏金任务（{platform_norm}）。")
+
+    rendered = await render_worldstate_rows_image_to_file(
+        title="平原赏金",
+        header_lines=[
+            f"平台：{platform_norm}",
+            f"共{len(rows)}个平原（展示前{len(rows)}个）",
+        ],
+        rows=rows,
+        accent=(245, 158, 11, 255),
+    )
+    if rendered:
+        return event.image_result(rendered.path)
+
+    lines = [f"平原赏金（{platform_norm}）共{len(rows)}个平原："]
+    for plain, info, jobs in plain_items:
+        plain_name = plain[0] or info.name or "平原"
+        lines.append(f"- {plain_name} | 剩余{info.eta} | 共{len(jobs)}条")
+        for j in jobs[:3]:
+            lines.append(f"  - 赏金 - {(j.node or '?')} | 剩余{j.eta}")
     return event.plain_result("\n".join(lines))
