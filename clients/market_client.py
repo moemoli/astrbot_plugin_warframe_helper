@@ -149,7 +149,7 @@ class WarframeMarketClient:
                     user.get("avatar") if isinstance(user.get("avatar"), str) else None
                 )
 
-            mod_rank = row.get("mod_rank")
+            mod_rank = row.get("rank")
             if mod_rank is not None and not isinstance(mod_rank, int):
                 mod_rank = None
 

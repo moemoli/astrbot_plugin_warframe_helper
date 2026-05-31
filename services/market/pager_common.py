@@ -149,7 +149,13 @@ def rank_wmr_auctions(
     negative_forbidden: bool,
     mastery_rank_min: int | None,
     polarity: str | None,
+    re_rolls: int | None = None,
 ) -> list[RivenAuction]:
+    """Rank and filter riven auctions.
+
+    Args:
+        re_rolls: None = no filter. 0 = zero rolls (零洗). N = exactly N rolls.
+    """
     platform_norm = (platform or "pc").strip().lower()
 
     filtered = [
@@ -160,6 +166,10 @@ def rank_wmr_auctions(
         and a.is_direct_sell
         and (a.platform or "").strip().lower() == platform_norm
     ]
+
+    # Filter by re_rolls.
+    if re_rolls is not None:
+        filtered = [a for a in filtered if a.re_rolls == re_rolls]
 
     req_pos = set(uniq_lower(positive_stats))
     req_neg = set(uniq_lower(negative_stats))
@@ -218,6 +228,7 @@ def build_wmr_summary(
     negative_forbidden: bool,
     mastery_rank_min: int | None,
     polarity: str | None,
+    re_rolls: int | None = None,
 ) -> str:
     def fmt_stats(stats: list[str]) -> str:
         return "+".join([RIVEN_STAT_CN.get(s, s) for s in stats])
@@ -235,6 +246,11 @@ def build_wmr_summary(
         parts.append(f"MR≥{mastery_rank_min}")
     if polarity:
         parts.append("极性" + RIVEN_POLARITY_CN.get(str(polarity), str(polarity)))
+    if re_rolls is not None:
+        if re_rolls == 0:
+            parts.append("零洗")
+        else:
+            parts.append(f"{re_rolls}洗")
 
     return " ".join(parts) if parts else "(无筛选)"
 
@@ -255,6 +271,7 @@ async def render_wmr_page_image(
     page: int,
     limit: int,
     attr_units: dict[str, str] | None = None,
+    re_rolls: int | None = None,
 ) -> tuple[WMRRenderedImage | None, list[RivenAuction], str]:
     picked = pick_page(auctions_ranked, page=page, limit=limit)
     if not picked:
@@ -267,6 +284,7 @@ async def render_wmr_page_image(
         negative_forbidden=negative_forbidden,
         mastery_rank_min=mastery_rank_min,
         polarity=polarity,
+        re_rolls=re_rolls,
     )
 
     rendered = await render_wmr_auctions_image_to_file(

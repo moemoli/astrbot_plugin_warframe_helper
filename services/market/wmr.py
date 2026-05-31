@@ -60,6 +60,9 @@ def _is_wmr_control_token(token_norm: str) -> bool:
         return True
     if "双暴" in t or "双爆" in t:
         return True
+    # Zero-roll keywords.
+    if t in {"零洗", "0洗", "零roll", "0roll", "零循环", "0循环"}:
+        return True
 
     return False
 
@@ -167,6 +170,7 @@ async def cmd_wmr(
     negative_forbidden = False
     mastery_rank_min: int | None = None
     polarity: str | None = None
+    re_rolls: int | None = None  # None=不限, 0=零洗, N=N洗
 
     pending_stats: list[tuple[str, bool]] = []
     unknown_tokens: list[str] = []
@@ -245,6 +249,34 @@ async def cmd_wmr(
                 positive_stats.append("slash_damage")
             if "冲击" in rest_tok:
                 positive_stats.append("impact_damage")
+            if "射速" in rest_tok or "攻速" in rest_tok:
+                positive_stats.append("fire_rate_/_attack_speed")
+            if "范围" in rest_tok:
+                positive_stats.append("range")
+            if "触发" in rest_tok:
+                positive_stats.append("status_chance")
+            if "穿透" in rest_tok:
+                positive_stats.append("punch_through")
+            if "处决" in rest_tok:
+                positive_stats.append("finisher_damage")
+            if "连击" in rest_tok and "时间" in rest_tok:
+                positive_stats.append("combo_duration")
+            if "初始" in rest_tok:
+                positive_stats.append("channeling_damage")
+            continue
+
+        # Zero-roll filter: "零洗", "0洗", etc.
+        if t_norm in {"零洗", "0洗", "零roll", "0roll", "零循环", "0循环"}:
+            re_rolls = 0
+            continue
+        # Numeric roll filter: "N洗" e.g. "5洗" -> re_rolls=5
+        m_roll = re.fullmatch(r"(\d{1,3})\s*洗", t_norm)
+        if m_roll:
+            re_rolls = int(m_roll.group(1))
+            continue
+        m_roll = re.fullmatch(r"(\d{1,3})\s*roll", t_norm)
+        if m_roll:
+            re_rolls = int(m_roll.group(1))
             continue
 
         if t_norm in {"负任意", "任意负", "有负", "要负"} or "负任意" in t_norm:
@@ -277,11 +309,50 @@ async def cmd_wmr(
                 positive_stats.append(url_name)
             continue
 
-        if "暴击率" in t_norm:
+        if "暴击率" in t_norm or "爆击" in t_norm or "爆率" in t_norm:
             positive_stats.append("critical_chance")
             continue
-        if "暴击伤害" in t_norm or "暴伤" in t_norm:
+        if "暴击伤害" in t_norm or "暴伤" in t_norm or "爆伤" in t_norm:
             positive_stats.append("critical_damage")
+            continue
+        if "投射物速度" in t_norm or "投射速度" in t_norm or "投射" in t_norm or "弹速" in t_norm:
+            positive_stats.append("projectile_speed")
+            continue
+        if "穿透" in t_norm:
+            positive_stats.append("punch_through")
+            continue
+        if "触发时间" in t_norm or "异常时间" in t_norm:
+            positive_stats.append("status_duration")
+            continue
+        if "后坐力" in t_norm or "后座" in t_norm:
+            positive_stats.append("recoil")
+            continue
+        if "初始连击" in t_norm:
+            positive_stats.append("channeling_damage")
+            continue
+        if "重击效率" in t_norm or "导引效率" in t_norm:
+            positive_stats.append("channeling_efficiency")
+            continue
+        if "处决伤害" in t_norm or "处决" in t_norm:
+            positive_stats.append("finisher_damage")
+            continue
+        if "射速" in t_norm or "攻速" in t_norm:
+            positive_stats.append("fire_rate_/_attack_speed")
+            continue
+        if "触发几率" in t_norm or "触发率" in t_norm:
+            positive_stats.append("status_chance")
+            continue
+        if "连击持续时间" in t_norm or "连击时间" in t_norm:
+            positive_stats.append("combo_duration")
+            continue
+        if "滑砍暴击" in t_norm or "滑暴" in t_norm or "滑行攻击暴击率" in t_norm:
+            positive_stats.append("critical_chance_on_slide_attack")
+            continue
+        if "额外连击" in t_norm:
+            positive_stats.append("chance_to_gain_extra_combo_count")
+            continue
+        if "连击几率" in t_norm or "连击率" in t_norm:
+            positive_stats.append("chance_to_gain_combo_count")
             continue
 
         unknown_tokens.append(str(t).strip())
@@ -386,6 +457,7 @@ async def cmd_wmr(
         negative_forbidden=bool(negative_forbidden),
         mastery_rank_min=mastery_rank_min,
         polarity=polarity,
+        re_rolls=re_rolls,
     )
     ranked = resort_wmr_auctions_by_presence(ranked)
 
@@ -412,6 +484,7 @@ async def cmd_wmr(
             "negative_forbidden": bool(negative_forbidden),
             "mastery_rank_min": mastery_rank_min,
             "polarity": polarity,
+            "re_rolls": re_rolls,
             "riven_attr_units": dict(attr_units),
             "reply_msg_id": str(
                 getattr(getattr(event, "message_obj", None), "message_id", None) or ""
@@ -434,6 +507,7 @@ async def cmd_wmr(
         page=page,
         limit=limit,
         attr_units=attr_units,
+        re_rolls=re_rolls,
     )
 
     if not top:

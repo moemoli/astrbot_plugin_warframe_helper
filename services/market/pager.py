@@ -226,6 +226,12 @@ async def cmd_wfp(
 
         polarity = state.get("polarity")
         polarity = str(polarity).strip().lower() if polarity else None
+        re_rolls = state.get("re_rolls")  # int | None
+        if re_rolls is not None:
+            try:
+                re_rolls = int(re_rolls)
+            except Exception:
+                re_rolls = None
         attr_units_raw = state.get("riven_attr_units")
         attr_units = (
             {
@@ -262,6 +268,7 @@ async def cmd_wfp(
             negative_forbidden=negative_forbidden,
             mastery_rank_min=mastery_rank_min,
             polarity=polarity,
+            re_rolls=re_rolls,
         )
         ranked = resort_wmr_auctions_by_presence(ranked)
 
@@ -280,6 +287,7 @@ async def cmd_wfp(
             page=new_page,
             limit=limit,
             attr_units=attr_units,
+            re_rolls=re_rolls,
         )
 
         if not top:
