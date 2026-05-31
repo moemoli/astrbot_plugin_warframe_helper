@@ -17,6 +17,8 @@ from ..http_utils import fetch_json
 from .nickname_registry import (
     NicknameRegistry,
     SYM_BASE_NICKNAMES,
+    SYM_RIVEN_STAT_NICKNAMES,
+    SYM_RIVEN_WEAPON_NICKNAMES,
     USER_ALIASES,
     normalize_alias_key,
 )
@@ -210,6 +212,7 @@ class WarframeTermMapper:
         base_aliases = self._nickname_registry.get_alias_map(SYM_BASE_NICKNAMES)
         merged_aliases = self._nickname_registry.get_alias_map(
             SYM_BASE_NICKNAMES,
+            SYM_RIVEN_WEAPON_NICKNAMES,
             USER_ALIASES,
         )
         self._base_alias_keys = set(base_aliases.keys())
@@ -474,9 +477,16 @@ class WarframeTermMapper:
 
         part_hint: str | None = None
         part_map: tuple[tuple[str, tuple[str, ...]], ...] = (
+            # Warframe components
             ("Neuroptics", ("neuro", "neuroptics", "头", "神经")),
             ("Chassis", ("chassis", "机体")),
             ("Systems", ("systems", "系统")),
+            # Weapon components
+            ("Receiver", ("receiver", "枪机")),
+            ("Barrel", ("barrel", "枪管")),
+            ("Stock", ("stock", "枪托")),
+            ("Blade", ("blade", "刀刃")),
+            ("Handle", ("handle", "握柄")),
         )
         for part_name, keywords in part_map:
             hit = False
@@ -532,6 +542,10 @@ class WarframeTermMapper:
         part: str | None = None
         root_words: list[str] = []
 
+        part_set: set[str] = {
+            "neuroptics", "chassis", "systems",
+            "receiver", "barrel", "stock", "blade", "handle",
+        }
         for w in words:
             lw = w.strip().lower()
             if lw == "prime":
@@ -543,7 +557,7 @@ class WarframeTermMapper:
             if lw == "blueprint":
                 has_blueprint = True
                 continue
-            if lw in {"neuroptics", "chassis", "systems"}:
+            if lw in part_set:
                 part = lw.capitalize() if lw != "systems" else "Systems"
                 continue
             root_words.append(w)

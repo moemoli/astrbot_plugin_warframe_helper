@@ -1820,10 +1820,13 @@ class WarframeWorldstateClient:
                     VoidTraderItem(item=item_name, ducats=ducats, credits=credits)
                 )
 
+        # When active, show time until departure (expiry).
+        # When inactive, show time until arrival (activation).
+        eta_dt = expiry if active else (activation or expiry)
         return VoidTraderInfo(
             active=active,
             location=location,
-            eta=_format_eta_from_dt(expiry),
+            eta=_format_eta_from_dt(eta_dt),
             inventory=tuple(inv),
         )
 
