@@ -271,7 +271,16 @@ class NicknameRegistry:
         self,
         *,
         url: str = DEFAULT_NICKNAME_REMOTE_URL,
+        merge_builtins: bool = True,
     ) -> dict[str, Any]:
+        """Fetch remote nickname table and save as new default.
+
+        Args:
+            url: Remote URL to fetch the JSON from.
+            merge_builtins: If True, merge local _BUILTIN_* sections with the
+                remote data so that local expansions are preserved. Local
+                entries take priority for same-key conflicts.
+        """
         src = str(url or "").strip() or DEFAULT_NICKNAME_REMOTE_URL
         data = await fetch_json(src, timeout_sec=20.0)
         if not isinstance(data, dict):
@@ -282,6 +291,36 @@ class NicknameRegistry:
             }
 
         normalized, _ = self._sanitize_payload(data)
+
+        if merge_builtins:
+            # Merge local built-in sections into the remote data.
+            # Local entries are preserved; new remote entries are added.
+            try:
+                local = self._default_payload()
+            except Exception:
+                local = {}
+            builtin_sections = [
+                SYM_BASE_NICKNAMES,
+                SYM_RIVEN_WEAPON_NICKNAMES,
+                SYM_RIVEN_STAT_NICKNAMES,
+            ]
+            for section in builtin_sections:
+                remote_section = normalized.get(section)
+                local_section = local.get(section)
+                if not isinstance(remote_section, dict):
+                    remote_section = {}
+                if not isinstance(local_section, dict):
+                    local_section = {}
+                # Local ∪ Remote (local wins for same key)
+                merged: dict[str, str] = {}
+                for k, v in remote_section.items():
+                    if isinstance(k, str) and isinstance(v, str):
+                        merged[k] = v
+                for k, v in local_section.items():
+                    if isinstance(k, str) and isinstance(v, str):
+                        merged[k] = v  # local overrides remote
+                normalized[section] = merged
+
         try:
             self.save_default(normalized)
             sync_stats = self.sync_default_to_data(preserve_user_aliases=True)
