@@ -24,8 +24,19 @@ def pick_page(items: list[T], *, page: int, limit: int) -> list[T]:
 
 
 def filter_sort_wm_orders(
-    orders: Iterable[MarketOrder], *, platform: str, order_type: str
+    orders: Iterable[MarketOrder],
+    *,
+    platform: str,
+    order_type: str,
+    mod_rank: int | str | None = None,
 ) -> list[MarketOrder]:
+    """Filter and sort WM orders.
+
+    Args:
+        mod_rank: None = no level filter.
+                  int  = only orders with mod_rank == this value.
+                  "max" = only orders with the highest mod_rank among visible orders.
+    """
     platform_norm = (platform or "pc").strip().lower()
     order_type_norm = (order_type or "sell").strip().lower()
 
@@ -36,6 +47,20 @@ def filter_sort_wm_orders(
         and o.order_type == order_type_norm
         and (o.platform or "").strip().lower() == platform_norm
     ]
+
+    # Apply mod_rank (level) filtering.
+    if mod_rank is not None and mod_rank != "":
+        if mod_rank == "max":
+            # Compute the max mod_rank among filtered orders that have a mod_rank.
+            max_rank: int | None = None
+            for o in filtered:
+                if o.mod_rank is not None:
+                    if max_rank is None or o.mod_rank > max_rank:
+                        max_rank = o.mod_rank
+            if max_rank is not None:
+                filtered = [o for o in filtered if o.mod_rank == max_rank]
+        elif isinstance(mod_rank, int):
+            filtered = [o for o in filtered if o.mod_rank == mod_rank]
 
     filtered.sort(
         key=lambda o: (

@@ -14,6 +14,64 @@ from ...helpers import split_tokens
 from ...mappers.term_mapping import WarframeTermMapper
 from .pager_common import filter_sort_wm_orders, render_wm_page_image
 
+# Chinese numeral to integer mapping for level parsing.
+_CN_NUM_SINGLE: dict[str, int] = {
+    "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+}
+
+# Patterns to detect level tokens.
+_LEVEL_KEYWORDS: set[str] = {"满级", "满等", "满", "max"}
+_LEVEL_SUFFIX_PATTERN = re.compile(r"^(.*?)\s*[级等]$")
+
+
+def _parse_level_token(token: str) -> int | str | None:
+    """Parse a single token as a level filter.
+
+    Returns:
+        int  — specific mod rank (e.g. 5 for "五级" / "5级")
+        "max" — max rank requested ("满级")
+        None — token is not a level expression
+    """
+    t = str(token or "").strip()
+    if not t:
+        return None
+
+    t_lower = t.lower()
+    if t_lower in _LEVEL_KEYWORDS:
+        return "max"
+
+    # Handle "五级" / "5级" / "十级" style.
+    m = _LEVEL_SUFFIX_PATTERN.match(t)
+    if m:
+        inner = m.group(1).strip()
+        if not inner:
+            return None
+        # Arabic: "5级" -> 5
+        if inner.isdigit():
+            return int(inner)
+        # Single Chinese numeral: "五级" -> 5
+        if inner in _CN_NUM_SINGLE:
+            return _CN_NUM_SINGLE[inner]
+        # "十几" pattern: "十二级" -> 12
+        if inner.startswith("十") and len(inner) >= 2:
+            suffix = inner[1:]
+            if suffix in _CN_NUM_SINGLE:
+                return 10 + _CN_NUM_SINGLE[suffix]
+        # "几十" pattern: "二十级" -> 20
+        if len(inner) >= 2 and inner.endswith("十"):
+            prefix = inner[:-1]
+            if prefix in _CN_NUM_SINGLE:
+                return _CN_NUM_SINGLE[prefix] * 10
+        # "几十几" pattern: "二十五级" -> 25
+        if "十" in inner:
+            parts = inner.split("十", 1)
+            if len(parts) == 2 and parts[0] in _CN_NUM_SINGLE and parts[1] in _CN_NUM_SINGLE:
+                return _CN_NUM_SINGLE[parts[0]] * 10 + _CN_NUM_SINGLE[parts[1]]
+        return None
+
+    return None
+
 
 async def cmd_wm(
     *,
@@ -53,6 +111,27 @@ async def cmd_wm(
     order_type = "sell"
     language = "zh"
     limit = 10
+    mod_rank_level: int | str | None = None  # int=特定等级, "max"=满级
+
+    # Detect level keyword embedded in query token (e.g. "满级xxx", "xxx五级").
+    _LEVEL_PREFIXES = ("满级", "满等", "满", "max")
+    for prefix in _LEVEL_PREFIXES:
+        if query.startswith(prefix) and len(query) > len(prefix):
+            mod_rank_level = "max"
+            query = query[len(prefix):]
+            break
+    if mod_rank_level is None:
+        for prefix in _LEVEL_PREFIXES:
+            if query.endswith(prefix) and len(query) > len(prefix):
+                mod_rank_level = "max"
+                query = query[:-len(prefix)]
+                break
+    # Also check query suffix for "X级" / "X等" pattern (e.g. "xxx5级").
+    if mod_rank_level is None:
+        m_sfx = re.match(r"^(.*?)(\d+)\s*[级等]$", query)
+        if m_sfx:
+            query = m_sfx.group(1)
+            mod_rank_level = int(m_sfx.group(2))
 
     for t in rest:
         t_norm = str(t).strip().lower()
@@ -70,6 +149,13 @@ async def cmd_wm(
         if t_norm in WM_SELL_ALIASES:
             order_type = "sell"
             continue
+
+        # Check level token BEFORE isdigit (since "5级" is not pure digits)
+        level = _parse_level_token(t)
+        if level is not None:
+            mod_rank_level = level
+            continue
+
         if t_norm.isdigit():
             limit = int(t_norm)
             continue
@@ -100,6 +186,7 @@ async def cmd_wm(
         orders,
         platform=platform_norm,
         order_type=order_type,
+        mod_rank=mod_rank_level,
     )
 
     limit = max(1, min(int(limit), 20))
@@ -121,6 +208,7 @@ async def cmd_wm(
             "order_type": order_type,
             "language": language,
             "item": item,
+            "mod_rank": mod_rank_level,
             "reply_msg_id": str(reply_msg_id) if reply_msg_id else "",
         },
     )

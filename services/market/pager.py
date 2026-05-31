@@ -92,6 +92,7 @@ async def cmd_wfp(
         platform_norm = str(state.get("platform") or "pc")
         order_type = str(state.get("order_type") or "sell")
         language = str(state.get("language") or "zh")
+        mod_rank = state.get("mod_rank")  # int | "max" | None
         if not item or not getattr(item, "slug", None):
             yield event.plain_result("分页信息已过期，请重新执行 /wm。")
             return
@@ -111,6 +112,7 @@ async def cmd_wfp(
             orders,
             platform=platform_norm,
             order_type=order_type,
+            mod_rank=mod_rank,
         )
 
         rendered, top = await render_wm_page_image(

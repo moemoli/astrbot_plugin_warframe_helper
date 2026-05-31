@@ -25,6 +25,7 @@ class MarketOrder:
     status: str | None
     ingame_name: str | None
     avatar: str | None
+    mod_rank: int | None = None
 
 
 class WarframeMarketClient:
@@ -148,6 +149,10 @@ class WarframeMarketClient:
                     user.get("avatar") if isinstance(user.get("avatar"), str) else None
                 )
 
+            mod_rank = row.get("mod_rank")
+            if mod_rank is not None and not isinstance(mod_rank, int):
+                mod_rank = None
+
             orders.append(
                 MarketOrder(
                     order_id=order_id,
@@ -159,6 +164,7 @@ class WarframeMarketClient:
                     status=status,
                     ingame_name=ingame_name,
                     avatar=avatar,
+                    mod_rank=mod_rank,
                 ),
             )
 
