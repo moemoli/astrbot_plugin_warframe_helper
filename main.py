@@ -736,9 +736,10 @@ class WarframeHelperPlugin(Star):
         cmd_text = match.group("cmd")
         rest = src[match.end("cmd") :]
 
-        # Keep legacy behavior: ASCII commands require a boundary to avoid
-        # accidental hits like `wfmapping` being interpreted as `wf`.
-        if rest and (not rest[0].isspace()) and cmd_text.isascii():
+        # Require a whitespace boundary after the command keyword to avoid
+        # accidental hits like `wfmapping` interpreting as `wf`,
+        # or `奸商来了没` interpreting as `奸商`.
+        if rest and (not rest[0].isspace()):
             return None, ""
 
         cmd_l = cmd_text.lower()
